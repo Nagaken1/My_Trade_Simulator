@@ -337,11 +337,20 @@ def main():
     for name, strategy_func in strategies.items():
         df_result = strategy_func(df.copy(), strategy_id=name)
         df_result = apply_statistics(df_result)
+
+        if 'Date' in df_result.columns:
+            df_result.set_index('Date', inplace=True)
+
         df_result.columns = [f"{name}_{col}" for col in df_result.columns]
         combined_df = combined_df.join(df_result, how='outer')
 
-    # 💾 出力
-    combined_df.to_csv("result_stats.csv")
+    # ✅ 最終的に input から Date を復元（時刻まで一致させる）
+    df_input = pd.read_csv(latest_file, parse_dates=["Date"])
+    combined_df.reset_index(drop=True, inplace=True)
+    combined_df.insert(0, "Date", df_input["Date"])
+
+    # 💾 CSVに保存
+    combined_df.to_csv("result_stats.csv", index=False)
     print("シミュレーション結果を 'result_stats.csv' に出力しました。")
 
 if __name__ == "__main__":

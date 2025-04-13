@@ -8,7 +8,8 @@ def run(df: pd.DataFrame, strategy_id: str = 'RuleB') -> pd.DataFrame:
     Signal: -1=売り, 1=買戻し, 0=何もしない
     Profit: 決済時に損益を記録（それ以外は0）
     """
-    result = pd.DataFrame(index=df['Date'])
+    result = pd.DataFrame({'Date': pd.to_datetime(df['Date'])})
+    result.set_index('Date', inplace=True)
     result['Signal'] = 0
     result['Profit'] = 0.0
 
@@ -16,7 +17,7 @@ def run(df: pd.DataFrame, strategy_id: str = 'RuleB') -> pd.DataFrame:
 
     for i in range(len(df)):
         now = df.iloc[i]
-        now_time = now['Date']
+        now_time = pd.to_datetime(df.iloc[i]['Date'])
         price = now['Close']
 
         # 新規売りポジション
