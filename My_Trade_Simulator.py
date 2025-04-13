@@ -53,60 +53,89 @@ class Position:
 # --- OrderBook クラス ---
 class OrderBook:
     def __init__(self):
-        self.pending_orders = []
+        self.orders = pd.DataFrame(columns=[
+            'side', 'price', 'quantity', 'order_time', 'order_type',
+            'trigger_price', 'triggered', 'status',
+            'execution_price', 'execution_time', 'position_effect'
+        ])
 
     def add_order(self, order):
-        self.pending_orders.append(order)
+        self.orders.loc[len(self.orders)] = {
+            'side': order.side,
+            'price': order.price,
+            'quantity': order.quantity,
+            'order_time': order.order_time,
+            'order_type': order.order_type,
+            'trigger_price': order.trigger_price,
+            'triggered': order.triggered,
+            'status': order.status,
+            'execution_price': order.execution_price,
+            'execution_time': order.execution_time,
+            'position_effect': order.position_effect
+        }
 
-    def match_orders(self, ohlc, positions):
+    def match_orders(self, ohlc, positions_df):
+        """OHLCに対して注文を評価し、約定注文のリストを返す"""
         executed = []
-        remaining = []
 
-        for order in self.pending_orders:
+        # 対象時刻の未約定注文のみ抽出
+        active_orders = self.orders[
+            (self.orders['status'] == 'pending') &
+            (self.orders['order_time'] == ohlc['time'])
+        ]
 
-            if order.order_time !=ohlc['time']:
-                remaining.append(order)
-                continue
+        for idx, order in active_orders.iterrows():
+            executed_flag = False
 
-            if order.order_type == 'market':# 成行注文の処理
-                order.status = 'executed'
-                order.execution_price =ohlc['close'] #約定価格は現在の終値
-                order.execution_time = ohlc['time']
-                executed.append(order)
+            if order['order_type'] == 'market':
+                self.orders.at[idx, 'status'] = 'executed'
+                self.orders.at[idx, 'execution_price'] = ohlc['close']
+                self.orders.at[idx, 'execution_time'] = ohlc['time']
+                executed_flag = True
 
-            elif order.order_type == 'limit': # 指値注文の処理
-                if order.position_effect == 'close':
-                    if self._is_settlement(order, positions):
-                        if self._can_execute_settlement(order, ohlc): # 決済注文の約定処理
-                            order.status = 'executed'
-                            order.execution_price = order.price
-                            order.execution_time =ohlc['time']
-                            executed.append(order)
-                        else:
-                            remaining.append(order)
-                    else: # 'open'
-                        if self._can_execute_new(order, ohlc): # 新規注文の約定処理
-                            order.status = 'executed'
-                            order.execution_price = order.price
-                            order.execution_time =ohlc['time']
-                            executed.append(order)
-                        else:
-                            remaining.append(order)
+            elif order['order_type'] == 'limit':
+                if order['position_effect'] == 'open':
+                    if (order['side'] == 'BUY' and ohlc['low'] <= order['price']) or \
+                    (order['side'] == 'SELL' and ohlc['high'] >= order['price']):
+                        self.orders.at[idx, 'status'] = 'executed'
+                        self.orders.at[idx, 'execution_price'] = order['price']
+                        self.orders.at[idx, 'execution_time'] = ohlc['time']
+                        executed_flag = True
+                else:  # position_effect == 'close'
+                    has_opposite = not positions_df[
+                        (positions_df['exit_time'].isna()) &
+                        (positions_df['side'] != order['side'])
+                    ].empty
+                    if has_opposite:
+                        if (order['side'] == 'BUY' and ohlc['low'] - 5 <= order['price']) or \
+                        (order['side'] == 'SELL' and ohlc['high'] + 5 >= order['price']):
+                            self.orders.at[idx, 'status'] = 'executed'
+                            self.orders.at[idx, 'execution_price'] = order['price']
+                            self.orders.at[idx, 'execution_time'] = ohlc['time']
+                            executed_flag = True
 
-            elif order.order_type == 'stop':# 逆指値注文の処理
-                if not order.triggered:
-                    if self._should_trigger(order, ohlc):
-                        order.triggered = True
-                        order.status = 'executed'
-                        order.execution_price =ohlc['close']
-                        order.execution_time =ohlc['time']
-                        executed.append(order)
-                    else:
-                        remaining.append(order)
-                else:
-                    remaining.append(order)
+            elif order['order_type'] == 'stop':
+                if not order['triggered']:
+                    if (order['side'] == 'BUY' and ohlc['high'] >= order['trigger_price']) or \
+                    (order['side'] == 'SELL' and ohlc['low'] <= order['trigger_price']):
+                        self.orders.at[idx, 'triggered'] = True
+                        self.orders.at[idx, 'status'] = 'executed'
+                        self.orders.at[idx, 'execution_price'] = ohlc['close']
+                        self.orders.at[idx, 'execution_time'] = ohlc['time']
+                        executed_flag = True
 
-        self.pending_orders = remaining
+            # 約定したら、元の Order オブジェクトとして返す
+            if executed_flag:
+                executed.append(Order(
+                    side=order['side'],
+                    price=order['price'],
+                    quantity=order['quantity'],
+                    order_time=order['order_time'],
+                    order_type=order['order_type'],
+                    trigger_price=order['trigger_price'],
+                    position_effect=order['position_effect']
+                ))
+
         return executed
 
     def _is_settlement(self, order, positions):#注文が現在のポジションの反対方向である場合、決済注文と判断
@@ -322,7 +351,9 @@ def sample_strategy(df, order_book, positions):
             position_effect='open'
         )
         order_book.add_order(order)
-        print(f"[OPEN] BUY @ {current['Date']}")
+
+        if i % 100 == 0:
+            print(f"[INFO] Order発行中: {current['Date']}")
 
         # 2分後に決済（SELL）
         if i + 2 < len(df):
