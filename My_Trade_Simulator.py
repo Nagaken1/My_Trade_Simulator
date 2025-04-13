@@ -136,6 +136,16 @@ class OrderBook:
 # --- 統計計算クラス ---
 class TradeStatisticsCalculator:
     @staticmethod
+    def total_profit(profit_array):
+        """累計損益（TotalProfit）の推移"""
+        total = 0
+        output_array = []
+        for p in profit_array:
+            total += p
+            output_array.append(total)
+        return output_array
+
+    @staticmethod
     def winning_rate(profit_array):
         """勝率（勝ちトレード数 ÷ トレード数）"""
         win_count = 0
@@ -210,14 +220,17 @@ class TradeStatisticsCalculator:
 
 # --- メイン処理 ---
 def run_simulation_with_stats(df):
-    # OHLCデータをクラスに変換
+
+    positions_df = pd.DataFrame(columns=[
+    'side', 'entry_price', 'quantity', 'entry_time', 'exit_price', 'exit_time'
+    ])
 
     order_book = OrderBook()
-    positions = []
 
-    # 戦略による注文発行（sample_strategyを使用）
-    sample_strategy(df, order_book, positions)
+    # 戦略による注文発行（order_bookに注文が溜まる）
+    sample_strategy(df, order_book, positions_df)
 
+    # OHLC処理（1行ずつ処理）
     for row in df.itertuples(index=False):
         ohlc = {
             'time': row.Date,
@@ -228,35 +241,45 @@ def run_simulation_with_stats(df):
         }
 
         # 約定チェック
-        executed_orders = order_book.match_orders(ohlc, positions)
+        executed_orders = order_book.match_orders(ohlc, positions_df)
 
         for order in executed_orders:
             if order.position_effect == 'open':
-                # 新規建玉
-                pos = Position(
-                    side=order.side,
-                    price=order.execution_price,
-                    quantity=order.quantity,
-                    entry_time=order.execution_time
-                )
-                positions.append(pos)
+                # 新規建玉をDataFrameに追加
+                positions_df.loc[len(positions_df)] = {
+                    'side': order.side,
+                    'entry_price': order.execution_price,
+                    'quantity': order.quantity,
+                    'entry_time': order.execution_time,
+                    'exit_price': None,
+                    'exit_time': None
+                }
             elif order.position_effect == 'close':
-                # 決済処理：反対サイドの建玉を1つ探して決済
-                for pos in positions:
-                    print(f"[PROFIT DEBUG] Entry={pos.price}, Exit={pos.exit_price}, P/L={pos.profit()}")
-                    if not pos.is_closed() and pos.side != order.side:
-                        pos.exit_price = order.execution_price
-                        pos.exit_time = order.execution_time
-                        matched = True
-                        break  # 一度に1つのみ決済
-                    if not matched:
-                        print(f"[WARN] 決済先ポジションが見つかりませんでした: {order.order_time}")
+                # 未決済 & 反対側のポジション1つ取得
+                mask = (positions_df['exit_time'].isna()) & (positions_df['side'] != order.side)
+                idx = positions_df[mask].index.min()
+
+                if pd.notna(idx):
+                    positions_df.at[idx, 'exit_price'] = order.execution_price
+                    positions_df.at[idx, 'exit_time'] = order.execution_time
+
 
     # 決済済みポジションの損益配列を作成
-    profits = [p.profit() for p in positions if p.is_closed()]
+    closed = positions_df.dropna(subset=['exit_price'])
+
+    # Profit計算
+    closed['Profit'] = closed.apply(
+        lambda row: (row['exit_price'] - row['entry_price']) * row['quantity']
+        if row['side'] == 'BUY'
+        else (row['entry_price'] - row['exit_price']) * row['quantity'],
+        axis=1
+    )
+
+    profits = closed['Profit'].tolist()
 
     # 統計指標の計算
     calc = TradeStatisticsCalculator()
+    total_profit = calc.total_profit(profits)
     win_rate = calc.winning_rate(profits)
     payoff = calc.payoff_ratio(profits)
     expected = calc.expected_value(win_rate, payoff)
@@ -265,7 +288,11 @@ def run_simulation_with_stats(df):
 
     # 結果をDataFrameにまとめて返す
     df_out = pd.DataFrame({
+        'EntryTime': closed['entry_time'],
+        'ExitTime': closed['exit_time'],
+        'Side': closed['side'],
         'Profit': profits,
+        'TotalProfit': total_profit,
         'WinningRate': win_rate,
         'PayoffRatio': payoff,
         'ExpectedValue': expected,
