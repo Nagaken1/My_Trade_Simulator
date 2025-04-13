@@ -1,6 +1,7 @@
 import os
 import glob
 import pandas as pd
+import importlib.util
 from collections import deque
 
 # --- OHLC クラス ---
@@ -294,153 +295,54 @@ def run_multi_strategy_simulation(df, strategies):
 
     return df_result
 
+# --- 戦略を読み込む関数 ---
+def load_strategies():
+    strategies = {}
+    for filepath in glob.glob("Rule_*.py"):
+        module_name = os.path.splitext(os.path.basename(filepath))[0]
+        spec = importlib.util.spec_from_file_location(module_name, filepath)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        strategies[module_name] = module.run
+    return strategies
 
-# --- 戦略---
-def sample_strategy_rule_a(df, strategy_id='RuleA'):
-    """
-    シンプルな戦略A: 毎分 BUY → 2分後に成行SELLで確定。
-    各分足ごとのSignal, Profit, TotalProfitを出力。
-    """
-    from collections import deque
-
-    # 出力用DataFrame
-    result = pd.DataFrame(index=df['Date'])
-    result['Signal'] = 0
-    result['Profit'] = 0.0
-
-    # 建玉管理（FIFOキュー）
-    positions = deque()
-
-    for i in range(len(df)):
-        now = df.iloc[i]
-        now_time = now['Date']
-        price = now['Close']
-
-        # --- ① 新規買いエントリー（毎分）
-        order = Order(
-            side='BUY',
-            price=price,
-            quantity=1,
-            order_time=now_time,
-            order_type='market',
-            position_effect='open',
-            strategy_id=strategy_id
-        )
-        # 新規建玉を保持
-        positions.append({
-            'entry_time': now_time,
-            'entry_price': price,
-            'quantity': 1
-        })
-        result.at[now_time, 'Signal'] = 1  # 1 = エントリー
-
-        # --- ② 2分後に成行で決済
-        if len(positions) > 0 and i >= 2:
-            pos = positions.popleft()
-            exit_time = now_time
-            exit_price = price
-            pnl = (exit_price - pos['entry_price']) * pos['quantity']
-            result.at[exit_time, 'Profit'] = pnl
-
-    # --- 累積損益
+# --- Strategy Metrics Applier ---
+def apply_statistics(result_df: pd.DataFrame) -> pd.DataFrame:
     calc = TradeStatisticsCalculator()
-    profits = result['Profit'].tolist()
-    result['TotalProfit'] = calc.total_profit(profits)
-    result['WinningRate'] = calc.winning_rate(profits)
-    result['PayoffRatio'] = calc.payoff_ratio(profits)
-    result['ExpectedValue'] = calc.expected_value(result['WinningRate'], result['PayoffRatio'])
-    result['DrawDown'] = calc.drawdown(profits)
-    result['MaxDrawDown'] = calc.max_drawdown(result['DrawDown'])
-    return result
-
-
-# --- Sample Strategy Rule B ---
-def sample_strategy_rule_b(df, strategy_id='RuleB'):
-    result = pd.DataFrame(index=df['Date'])
-    result['Signal'] = 0
-    result['Profit'] = 0.0
-
-    positions = deque()
-
-    for i in range(len(df)):
-        now = df.iloc[i]
-        now_time = now['Date']
-        price = now['Close']
-
-        # SELL エントリー
-        order = Order(
-            side='SELL',
-            price=price,
-            quantity=1,
-            order_time=now_time,
-            order_type='market',
-            position_effect='open',
-            strategy_id=strategy_id
-        )
-        positions.append({
-            'entry_time': now_time,
-            'entry_price': price,
-            'quantity': 1
-        })
-        result.at[now_time, 'Signal'] = -1
-
-        # 3分後にBUYで決済
-        if len(positions) > 0 and i >= 3:
-            pos = positions.popleft()
-            exit_time = now_time
-            exit_price = price
-            pnl = (pos['entry_price'] - exit_price) * pos['quantity']  # 売りから入って利益
-            result.at[exit_time, 'Profit'] = pnl
-
-    calc = TradeStatisticsCalculator()
-    profits = result['Profit'].tolist()
-    result['TotalProfit'] = calc.total_profit(profits)
-    result['WinningRate'] = calc.winning_rate(profits)
-    result['PayoffRatio'] = calc.payoff_ratio(profits)
-    result['ExpectedValue'] = calc.expected_value(result['WinningRate'], result['PayoffRatio'])
-    result['DrawDown'] = calc.drawdown(profits)
-    result['MaxDrawDown'] = calc.max_drawdown(result['DrawDown'])
-    return result
-
-
+    profits = result_df['Profit'].tolist()
+    result_df['TotalProfit'] = calc.total_profit(profits)
+    result_df['WinningRate'] = calc.winning_rate(profits)
+    result_df['PayoffRatio'] = calc.payoff_ratio(profits)
+    result_df['ExpectedValue'] = calc.expected_value(result_df['WinningRate'], result_df['PayoffRatio'])
+    result_df['DrawDown'] = calc.drawdown(result_df['TotalProfit'])
+    result_df['MaxDrawDown'] = calc.max_drawdown(result_df['DrawDown'])
+    return result_df
 
 # --- 実行ブロック ---
-def run_multi_strategy_simulation(df, strategies):
-    df_result = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
-
-    for strategy_func, strategy_id in strategies:
-        df_strategy = strategy_func(df.copy(), strategy_id=strategy_id)
-        df_strategy = df_strategy.add_prefix(f"{strategy_id}_")
-
-        if 'Date' in df_strategy.columns:
-            df_result = df_result.merge(df_strategy, on='Date', how='left')
-        else:
-            df_result = df_result.merge(df_strategy, left_on='Date', right_index=True, how='left')
-
-    return df_result
-
-
-if __name__ == '__main__':
-    import os
-    import glob
-
+def main():
+    # 📁 Input_csv フォルダから最新ファイルを取得
     csv_files = glob.glob(os.path.join("Input_csv", "*.csv"))
     if not csv_files:
         print("Input_csv フォルダに CSV ファイルが見つかりません。")
-        exit()
+        return
 
     latest_file = max(csv_files, key=os.path.getmtime)
     print(f"最新のファイルを読み込みます: {latest_file}")
-
     df = pd.read_csv(latest_file, parse_dates=['Date'])
 
-    strategies = [
-        (sample_strategy_rule_a, 'RuleA'),
-        (sample_strategy_rule_b, 'RuleB')
-    ]
+    # 🔄 戦略読み込みと実行
+    strategies = load_strategies()
+    combined_df = pd.DataFrame(index=df['Date'])
 
-    result = run_multi_strategy_simulation(df, strategies)
-    print(result.head())
+    for name, strategy_func in strategies.items():
+        df_result = strategy_func(df.copy(), strategy_id=name)
+        df_result = apply_statistics(df_result)
+        df_result.columns = [f"{name}_{col}" for col in df_result.columns]
+        combined_df = combined_df.join(df_result, how='outer')
 
-    result.to_csv("result_multi_strategy.csv", index=False)
-    print("シミュレーション結果を 'result_multi_strategy.csv' に出力しました。")
+    # 💾 出力
+    combined_df.to_csv("result_stats.csv")
+    print("シミュレーション結果を 'result_stats.csv' に出力しました。")
+
+if __name__ == "__main__":
+    main()
