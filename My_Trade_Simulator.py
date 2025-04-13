@@ -173,88 +173,83 @@ class OrderBook:
 
 # --- 統計計算クラス ---
 class TradeStatisticsCalculator:
-    @staticmethod
-    def total_profit(profit_array):
-        """累計損益（TotalProfit）の推移"""
-        total = 0
-        output_array = []
-        for p in profit_array:
-            total += p
-            output_array.append(total)
-        return output_array
+    """取引損益に基づく戦略指標を時系列で計算"""
 
     @staticmethod
-    def winning_rate(profit_array):
-        """勝率（勝ちトレード数 ÷ トレード数）"""
-        win_count = 0
-        trade_count = 0
-        output_array = []
+    def winning_rate(profit_list):
+        """勝率の推移（= 勝ち数 / 総取引数）"""
+        wins = 0
+        trades = 0
+        rates = []
 
-        for i, profit in enumerate(profit_array):
-            if profit > 0:
-                win_count += 1
-            if profit != 0:
-                trade_count += 1
+        for p in profit_list:
+            if p > 0:
+                wins += 1
+            if p != 0:
+                trades += 1
 
-            if trade_count != 0:
-                output_array.append(round(win_count / trade_count, 4))
+            if trades > 0:
+                rates.append(round(wins / trades, 4))
             else:
-                output_array.append(output_array[i-1] if i > 0 else 0)
+                rates.append(0.0)
 
-        return output_array
+        return rates
 
     @staticmethod
-    def payoff_ratio(profit_array):
-        """ペイオフレシオ（平均利益 ÷ 平均損失）"""
-        total_win_profit = 0
-        total_lose_profit = 0
+    def payoff_ratio(profit_list):
+        """ペイオフレシオの推移（= 平均利益 / 平均損失）"""
+        win_total = 0
+        loss_total = 0
         win_count = 0
-        lose_count = 0
-        output_array = []
+        loss_count = 0
+        ratios = []
 
-        for profit in profit_array:
-            if profit > 0:
-                total_win_profit += profit
+        for p in profit_list:
+            if p > 0:
+                win_total += p
                 win_count += 1
-            elif profit < 0:
-                total_lose_profit += profit
-                lose_count += 1
+            elif p < 0:
+                loss_total += p
+                loss_count += 1
 
-            if win_count != 0 and lose_count != 0:
-                payoff = (total_win_profit / win_count) / abs(total_lose_profit / lose_count)
-                output_array.append(round(payoff, 4))
+            if win_count > 0 and loss_count > 0:
+                avg_win = win_total / win_count
+                avg_loss = abs(loss_total / loss_count)
+                ratios.append(round(avg_win / avg_loss, 4))
             else:
-                output_array.append(0)
+                ratios.append(0.0)
 
-        return output_array
-
-    @staticmethod
-    def expected_value(winning_rate_array, payoff_ratio_array):
-        """期待値（勝率×ペイオフレシオ − 負け率）"""
-        output_array = []
-        for w, p in zip(winning_rate_array, payoff_ratio_array):
-            ev = w * p - (1 - w)
-            output_array.append(round(ev, 4))
-        return output_array
+        return ratios
 
     @staticmethod
-    def draw_down(profit_array):
-        """ドローダウン（最大益からの下落）"""
-        output_array = []
-        for i in range(len(profit_array)):
-            draw_down = max(profit_array[:i+1]) - profit_array[i]
-            output_array.append(draw_down)
-        return output_array
+    def expected_value(winning_rate_list, payoff_ratio_list):
+        """期待値の推移（= 勝率×ペイオフ − 負け率）"""
+        expected = []
+
+        for win_rate, payoff in zip(winning_rate_list, payoff_ratio_list):
+            ev = win_rate * payoff - (1 - win_rate)
+            expected.append(round(ev, 4))
+
+        return expected
 
     @staticmethod
-    def max_draw_down(draw_down_array):
-        """最大ドローダウンの推移"""
-        output_array = []
+    def drawdown(profit_list):
+        dd = []
+        max_profit = 0
+        for p in profit_list:
+            max_profit = max(max_profit, p)
+            dd.append(round(max_profit - p, 4))
+        return dd
+
+    @staticmethod
+    def max_drawdown(drawdown_list):
         max_dd = 0
-        for dd in draw_down_array:
-            max_dd = max(max_dd, dd)
-            output_array.append(max_dd)
-        return output_array
+        max_list = []
+        for d in drawdown_list:
+            max_dd = max(max_dd, d)
+            max_list.append(max_dd)
+        return max_list
+
 
 # --- メイン処理 ---
 def run_multi_strategy_simulation(df, strategies):
@@ -339,7 +334,13 @@ def sample_strategy_rule_a(df, strategy_id='RuleA'):
 
     # --- 累積損益
     result['TotalProfit'] = result['Profit'].cumsum()
-
+    calc = TradeStatisticsCalculator()
+    profits = result['Profit'].tolist()
+    result['WinningRate'] = calc.winning_rate(profits)
+    result['PayoffRatio'] = calc.payoff_ratio(profits)
+    result['ExpectedValue'] = calc.expected_value(result['WinningRate'], result['PayoffRatio'])
+    result['DrawDown'] = calc.drawdown(profits)
+    result['MaxDrawDown'] = calc.max_drawdown(result['DrawDown'])
     return result
 
 
@@ -382,6 +383,13 @@ def sample_strategy_rule_b(df, strategy_id='RuleB'):
             result.at[exit_time, 'Profit'] = pnl
 
     result['TotalProfit'] = result['Profit'].cumsum()
+    calc = TradeStatisticsCalculator()
+    profits = result['Profit'].tolist()
+    result['WinningRate'] = calc.winning_rate(profits)
+    result['PayoffRatio'] = calc.payoff_ratio(profits)
+    result['ExpectedValue'] = calc.expected_value(result['WinningRate'], result['PayoffRatio'])
+    result['DrawDown'] = calc.drawdown(profits)
+    result['MaxDrawDown'] = calc.max_drawdown(result['DrawDown'])
     return result
 
 
