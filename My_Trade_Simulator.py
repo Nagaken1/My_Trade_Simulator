@@ -1,6 +1,7 @@
 import os
 import glob
 import pandas as pd
+from collections import deque
 
 # --- OHLC クラス ---
 class OHLC:
@@ -11,9 +12,10 @@ class OHLC:
         self.low = low        # 安値（float）
         self.close = close    # 終値（float）
 
-# --- Position クラス ---
+# --- Order クラス ---
 class Order:
-    def __init__(self, side, price, quantity, order_time, order_type='limit', trigger_price=None, position_effect='open'):
+    def __init__(self, side, price, quantity, order_time, order_type='limit', trigger_price=None,position_effect='open', strategy_id='default'):
+        self.strategy_id = strategy_id
         self.side = side  # 'BUY' または 'SELL'
         self.price = price  # 注文価格
         self.quantity = quantity  # 注文数量
@@ -26,7 +28,7 @@ class Order:
         self.execution_time = None  # 約定時刻
         self.position_effect = position_effect  # 'open'（新規）または 'close'（決済）
 
-
+# --- Position クラス ---
 class Position:
     def __init__(self, side, price, quantity, entry_time, exit_time=None, exit_price=None):
         self.side = side              # 'BUY' または 'SELL'
@@ -54,13 +56,14 @@ class Position:
 class OrderBook:
     def __init__(self):
         self.orders = pd.DataFrame(columns=[
-            'side', 'price', 'quantity', 'order_time', 'order_type',
+            'strategy_id','side', 'price', 'quantity', 'order_time', 'order_type',
             'trigger_price', 'triggered', 'status',
             'execution_price', 'execution_time', 'position_effect'
         ])
 
     def add_order(self, order):
         self.orders.loc[len(self.orders)] = {
+            'strategy_id': order.strategy_id,
             'side': order.side,
             'price': order.price,
             'quantity': order.quantity,
@@ -104,7 +107,8 @@ class OrderBook:
                 else:  # position_effect == 'close'
                     has_opposite = not positions_df[
                         (positions_df['exit_time'].isna()) &
-                        (positions_df['side'] != order['side'])
+                        (positions_df['side'] != order['side'])&
+                        (positions_df['strategy_id'] == order['strategy_id'])
                     ].empty
                     if has_opposite:
                         if (order['side'] == 'BUY' and ohlc['low'] - 5 <= order['price']) or \
@@ -126,7 +130,8 @@ class OrderBook:
 
             # 約定したら、元の Order オブジェクトとして返す
             if executed_flag:
-                executed.append(Order(
+                exec_order = Order(
+                    strategy_id=order['strategy_id'],
                     side=order['side'],
                     price=order['price'],
                     quantity=order['quantity'],
@@ -134,7 +139,11 @@ class OrderBook:
                     order_type=order['order_type'],
                     trigger_price=order['trigger_price'],
                     position_effect=order['position_effect']
-                ))
+                )
+                exec_order.status = 'executed'
+                exec_order.execution_price = self.orders.at[idx, 'execution_price']
+                exec_order.execution_time = self.orders.at[idx, 'execution_time']
+                executed.append(exec_order)
 
         return executed
 
@@ -248,130 +257,155 @@ class TradeStatisticsCalculator:
         return output_array
 
 # --- メイン処理 ---
-def run_simulation_with_stats(df):
+def run_multi_strategy_simulation(df, strategies):
+    """
+    複数の戦略を時系列で横並びにシミュレーションし、統合結果をDataFrameで返す。
 
-    positions_df = pd.DataFrame(columns=[
-    'side', 'entry_price', 'quantity', 'entry_time', 'exit_price', 'exit_time'
-    ])
+    Parameters:
+        df: pandas.DataFrame
+            元の1分足OHLCデータ（Date列がdatetime）
+        strategies: list of tuples
+            (strategy_func, strategy_id) のリスト
 
-    order_book = OrderBook()
+    Returns:
+        df_result: pandas.DataFrame
+            戦略別指標が横並びになった結果
+    """
+    # 共通のOHLC部分を保持
+    df_result = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
 
-    # 戦略による注文発行（order_bookに注文が溜まる）
-    sample_strategy(df, order_book, positions_df)
+    # 各戦略を順番に実行
+    for strategy_func, strategy_id in strategies:
+        df_strategy = strategy_func(df.copy(), strategy_id=strategy_id)
 
-    # OHLC処理（1行ずつ処理）
-    for row in df.itertuples(index=False):
-        ohlc = {
-            'time': row.Date,
-            'open': row.Open,
-            'high': row.High,
-            'low': row.Low,
-            'close': row.Close
-        }
+        # 各列名に strategy_id を付加して区別（例: RuleA_Profit, RuleA_Signal）
+        df_strategy = df_strategy.add_prefix(f"{strategy_id}_")
 
-        # 約定チェック
-        executed_orders = order_book.match_orders(ohlc, positions_df)
+        # インデックスが Date なら join、そうでなければマージ
+        if 'Date' in df_strategy.columns:
+            df_result = df_result.merge(df_strategy, on='Date', how='left')
+        else:
+            df_result = df_result.merge(df_strategy, left_on='Date', right_index=True, how='left')
 
-        for order in executed_orders:
-            if order.position_effect == 'open':
-                # 新規建玉をDataFrameに追加
-                positions_df.loc[len(positions_df)] = {
-                    'side': order.side,
-                    'entry_price': order.execution_price,
-                    'quantity': order.quantity,
-                    'entry_time': order.execution_time,
-                    'exit_price': None,
-                    'exit_time': None
-                }
-            elif order.position_effect == 'close':
-                # 未決済 & 反対側のポジション1つ取得
-                mask = (positions_df['exit_time'].isna()) & (positions_df['side'] != order.side)
-                idx = positions_df[mask].index.min()
-
-                if pd.notna(idx):
-                    positions_df.at[idx, 'exit_price'] = order.execution_price
-                    positions_df.at[idx, 'exit_time'] = order.execution_time
-
-
-    # 決済済みポジションの損益配列を作成
-    closed = positions_df.dropna(subset=['exit_price'])
-
-    # Profit計算
-    closed['Profit'] = closed.apply(
-        lambda row: (row['exit_price'] - row['entry_price']) * row['quantity']
-        if row['side'] == 'BUY'
-        else (row['entry_price'] - row['exit_price']) * row['quantity'],
-        axis=1
-    )
-
-    profits = closed['Profit'].tolist()
-
-    # 統計指標の計算
-    calc = TradeStatisticsCalculator()
-    total_profit = calc.total_profit(profits)
-    win_rate = calc.winning_rate(profits)
-    payoff = calc.payoff_ratio(profits)
-    expected = calc.expected_value(win_rate, payoff)
-    dd = calc.draw_down(profits)
-    max_dd = calc.max_draw_down(dd)
-
-    # 結果をDataFrameにまとめて返す
-    df_out = pd.DataFrame({
-        'EntryTime': closed['entry_time'],
-        'ExitTime': closed['exit_time'],
-        'Side': closed['side'],
-        'Profit': profits,
-        'TotalProfit': total_profit,
-        'WinningRate': win_rate,
-        'PayoffRatio': payoff,
-        'ExpectedValue': expected,
-        'DrawDown': dd,
-        'MaxDrawDown': max_dd
-    })
-
-    return df_out
+    return df_result
 
 
 # --- 戦略---
-def sample_strategy(df, order_book, positions):
+def sample_strategy_rule_a(df, strategy_id='RuleA'):
     """
-    毎分 BUY → 2分後に SELL 決済 という確実に利益/損益が発生する単純戦略
-    全て成行注文で確実に約定させる
+    シンプルな戦略A: 毎分 BUY → 2分後に成行SELLで確定。
+    各分足ごとのSignal, Profit, TotalProfitを出力。
     """
-    for i in range(len(df)):
-        current = df.iloc[i]
+    from collections import deque
 
-        # 新規建玉
+    # 出力用DataFrame
+    result = pd.DataFrame(index=df['Date'])
+    result['Signal'] = 0
+    result['Profit'] = 0.0
+
+    # 建玉管理（FIFOキュー）
+    positions = deque()
+
+    for i in range(len(df)):
+        now = df.iloc[i]
+        now_time = now['Date']
+        price = now['Close']
+
+        # --- ① 新規買いエントリー（毎分）
         order = Order(
             side='BUY',
-            price=current['Close'],
+            price=price,
             quantity=1,
-            order_time=current['Date'],
+            order_time=now_time,
             order_type='market',
-            position_effect='open'
+            position_effect='open',
+            strategy_id=strategy_id
         )
-        order_book.add_order(order)
+        # 新規建玉を保持
+        positions.append({
+            'entry_time': now_time,
+            'entry_price': price,
+            'quantity': 1
+        })
+        result.at[now_time, 'Signal'] = 1  # 1 = エントリー
 
-        if i % 100 == 0:
-            print(f"[INFO] Order発行中: {current['Date']}")
+        # --- ② 2分後に成行で決済
+        if len(positions) > 0 and i >= 2:
+            pos = positions.popleft()
+            exit_time = now_time
+            exit_price = price
+            pnl = (exit_price - pos['entry_price']) * pos['quantity']
+            result.at[exit_time, 'Profit'] = pnl
 
-        # 2分後に決済（SELL）
-        if i + 2 < len(df):
-            close = df.iloc[i + 2]
-            order_close = Order(
-                side='SELL',
-                price=close['Close'] - 5 ,
-                quantity=1,
-                order_time=close['Date'],
-                order_type='market',
-                position_effect='close'
-            )
-            order_book.add_order(order_close)
-            print(f"[CLOSE] SELL @ {close['Date']}")
+    # --- 累積損益
+    result['TotalProfit'] = result['Profit'].cumsum()
 
-# --- 実行 ---
+    return result
+
+
+# --- Sample Strategy Rule B ---
+def sample_strategy_rule_b(df, strategy_id='RuleB'):
+    result = pd.DataFrame(index=df['Date'])
+    result['Signal'] = 0
+    result['Profit'] = 0.0
+
+    positions = deque()
+
+    for i in range(len(df)):
+        now = df.iloc[i]
+        now_time = now['Date']
+        price = now['Close']
+
+        # SELL エントリー
+        order = Order(
+            side='SELL',
+            price=price,
+            quantity=1,
+            order_time=now_time,
+            order_type='market',
+            position_effect='open',
+            strategy_id=strategy_id
+        )
+        positions.append({
+            'entry_time': now_time,
+            'entry_price': price,
+            'quantity': 1
+        })
+        result.at[now_time, 'Signal'] = -1
+
+        # 3分後にBUYで決済
+        if len(positions) > 0 and i >= 3:
+            pos = positions.popleft()
+            exit_time = now_time
+            exit_price = price
+            pnl = (pos['entry_price'] - exit_price) * pos['quantity']  # 売りから入って利益
+            result.at[exit_time, 'Profit'] = pnl
+
+    result['TotalProfit'] = result['Profit'].cumsum()
+    return result
+
+
+
+# --- 実行ブロック ---
+def run_multi_strategy_simulation(df, strategies):
+    df_result = df[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
+
+    for strategy_func, strategy_id in strategies:
+        df_strategy = strategy_func(df.copy(), strategy_id=strategy_id)
+        df_strategy = df_strategy.add_prefix(f"{strategy_id}_")
+
+        if 'Date' in df_strategy.columns:
+            df_result = df_result.merge(df_strategy, on='Date', how='left')
+        else:
+            df_result = df_result.merge(df_strategy, left_on='Date', right_index=True, how='left')
+
+    return df_result
+
+
 if __name__ == '__main__':
-    # 📁 Input_csv フォルダ内の最新の CSV ファイルを取得
+    import os
+    import glob
+
     csv_files = glob.glob(os.path.join("Input_csv", "*.csv"))
     if not csv_files:
         print("Input_csv フォルダに CSV ファイルが見つかりません。")
@@ -380,13 +414,15 @@ if __name__ == '__main__':
     latest_file = max(csv_files, key=os.path.getmtime)
     print(f"最新のファイルを読み込みます: {latest_file}")
 
-    # 📄 CSV ファイルを読み込む
     df = pd.read_csv(latest_file, parse_dates=['Date'])
 
-    # 🧠 シミュレーション実行
-    result = run_simulation_with_stats(df)
-    print(result)
+    strategies = [
+        (sample_strategy_rule_a, 'RuleA'),
+        (sample_strategy_rule_b, 'RuleB')
+    ]
 
-    # 💾 結果を CSV ファイルとして保存
-    result.to_csv("result_stats.csv", index=False)
-    print("シミュレーション結果を 'result_stats.csv' に出力しました。")
+    result = run_multi_strategy_simulation(df, strategies)
+    print(result.head())
+
+    result.to_csv("result_multi_strategy.csv", index=False)
+    print("シミュレーション結果を 'result_multi_strategy.csv' に出力しました。")
