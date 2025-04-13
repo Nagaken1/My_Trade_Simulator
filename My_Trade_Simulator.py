@@ -64,14 +64,14 @@ class OrderBook:
 
         for order in self.pending_orders:
 
-            if order.order_time != ohlc.time:
+            if order.order_time !=ohlc['time']:
                 remaining.append(order)
                 continue
 
             if order.order_type == 'market':# 成行注文の処理
                 order.status = 'executed'
-                order.execution_price = ohlc.close #約定価格は現在の終値
-                order.execution_time = ohlc.time
+                order.execution_price =ohlc['close'] #約定価格は現在の終値
+                order.execution_time = ohlc['time']
                 executed.append(order)
 
             elif order.order_type == 'limit': # 指値注文の処理
@@ -80,7 +80,7 @@ class OrderBook:
                         if self._can_execute_settlement(order, ohlc): # 決済注文の約定処理
                             order.status = 'executed'
                             order.execution_price = order.price
-                            order.execution_time = ohlc.time
+                            order.execution_time =ohlc['time']
                             executed.append(order)
                         else:
                             remaining.append(order)
@@ -88,7 +88,7 @@ class OrderBook:
                         if self._can_execute_new(order, ohlc): # 新規注文の約定処理
                             order.status = 'executed'
                             order.execution_price = order.price
-                            order.execution_time = ohlc.time
+                            order.execution_time =ohlc['time']
                             executed.append(order)
                         else:
                             remaining.append(order)
@@ -98,8 +98,8 @@ class OrderBook:
                     if self._should_trigger(order, ohlc):
                         order.triggered = True
                         order.status = 'executed'
-                        order.execution_price = ohlc.close
-                        order.execution_time = ohlc.time
+                        order.execution_price =ohlc['close']
+                        order.execution_time =ohlc['time']
                         executed.append(order)
                     else:
                         remaining.append(order)
@@ -117,21 +117,21 @@ class OrderBook:
 
     def _can_execute_new(self, order, ohlc):
         if order.side == 'BUY':
-            return ohlc.low <= order.price
+            return ohlc['low'] <= order.price
         else:
-            return ohlc.high >= order.price
+            return ohlc['high'] >= order.price
 
     def _can_execute_settlement(self, order, ohlc):
         if order.side == 'BUY':
-            return ohlc.low - 5 <= order.price
+            return ohlc['low'] - 5 <= order.price
         else:
-            return ohlc.high + 5 >= order.price
+            return ohlc['high'] + 5 >= order.price
 
     def _should_trigger(self, order, ohlc):
         if order.side == 'BUY':
-            return ohlc.high >= order.trigger_price
+            return ohlc['high'] >= order.trigger_price
         else:
-            return ohlc.low <= order.trigger_price
+            return ohlc['low'] <= order.trigger_price
 
 # --- 統計計算クラス ---
 class TradeStatisticsCalculator:
@@ -211,10 +211,6 @@ class TradeStatisticsCalculator:
 # --- メイン処理 ---
 def run_simulation_with_stats(df):
     # OHLCデータをクラスに変換
-    ohlc_list = [
-        OHLC(row['Date'], row['Open'], row['High'], row['Low'], row['Close'])
-        for _, row in df.iterrows()
-    ]
 
     order_book = OrderBook()
     positions = []
@@ -222,10 +218,18 @@ def run_simulation_with_stats(df):
     # 戦略による注文発行（sample_strategyを使用）
     sample_strategy(df, order_book, positions)
 
-    # 1本ずつシミュレーション
-    for ohlc in ohlc_list:
+    for row in df.itertuples(index=False):
+        ohlc = {
+            'time': row.Date,
+            'open': row.Open,
+            'high': row.High,
+            'low': row.Low,
+            'close': row.Close
+        }
+
         # 約定チェック
         executed_orders = order_book.match_orders(ohlc, positions)
+
         for order in executed_orders:
             if order.position_effect == 'open':
                 # 新規建玉
