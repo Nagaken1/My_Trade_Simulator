@@ -176,6 +176,16 @@ class TradeStatisticsCalculator:
     """取引損益に基づく戦略指標を時系列で計算"""
 
     @staticmethod
+    def total_profit(profit_list):
+        """累計損益"""
+        total = 0
+        result = []
+        for p in profit_list:
+            total += p
+            result.append(total)
+        return result
+
+    @staticmethod
     def winning_rate(profit_list):
         """勝率の推移（= 勝ち数 / 総取引数）"""
         wins = 0
@@ -333,9 +343,9 @@ def sample_strategy_rule_a(df, strategy_id='RuleA'):
             result.at[exit_time, 'Profit'] = pnl
 
     # --- 累積損益
-    result['TotalProfit'] = result['Profit'].cumsum()
     calc = TradeStatisticsCalculator()
     profits = result['Profit'].tolist()
+    result['TotalProfit'] = calc.total_profit(profits)
     result['WinningRate'] = calc.winning_rate(profits)
     result['PayoffRatio'] = calc.payoff_ratio(profits)
     result['ExpectedValue'] = calc.expected_value(result['WinningRate'], result['PayoffRatio'])
@@ -382,9 +392,9 @@ def sample_strategy_rule_b(df, strategy_id='RuleB'):
             pnl = (pos['entry_price'] - exit_price) * pos['quantity']  # 売りから入って利益
             result.at[exit_time, 'Profit'] = pnl
 
-    result['TotalProfit'] = result['Profit'].cumsum()
     calc = TradeStatisticsCalculator()
     profits = result['Profit'].tolist()
+    result['TotalProfit'] = calc.total_profit(profits)
     result['WinningRate'] = calc.winning_rate(profits)
     result['PayoffRatio'] = calc.payoff_ratio(profits)
     result['ExpectedValue'] = calc.expected_value(result['WinningRate'], result['PayoffRatio'])
