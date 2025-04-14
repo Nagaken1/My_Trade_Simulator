@@ -13,6 +13,11 @@ def run(df: pd.DataFrame, strategy_id: str = 'RuleA') -> pd.DataFrame:
     result['Signal'] = 0
     result['Profit'] = 0.0
 
+    # ✅ マーカー列を追加
+    result['OrderPlaced'] = 0
+    result['Executed'] = 0
+    result['LossCutTriggered'] = 0
+
     positions = deque()
 
     for i in range(len(df)):
@@ -20,9 +25,11 @@ def run(df: pd.DataFrame, strategy_id: str = 'RuleA') -> pd.DataFrame:
         now_time = pd.to_datetime(df.iloc[i]['Date'])
         price = now['Close']
 
-        # 新規買いポジション
+        # 新規BUY
         positions.append({'entry_time': now_time, 'entry_price': price, 'quantity': 1})
         result.at[now_time, 'Signal'] = 1
+        result.at[now_time, 'OrderPlaced'] = 1  # ✅ 注文記録
+        result.at[now_time, 'Executed'] = 1     # ✅ 即約定とみなす
 
         # 2分後に決済
         if len(positions) > 0 and i >= 2:

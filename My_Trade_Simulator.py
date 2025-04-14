@@ -321,7 +321,8 @@ def apply_statistics(result_df: pd.DataFrame) -> pd.DataFrame:
 
 # --- 実行ブロック ---
 def main():
-    # 📁 Input_csv フォルダから最新ファイルを取得
+
+    # 📁 最新ファイル取得
     csv_files = glob.glob(os.path.join("Input_csv", "*.csv"))
     if not csv_files:
         print("Input_csv フォルダに CSV ファイルが見つかりません。")
@@ -331,7 +332,7 @@ def main():
     print(f"最新のファイルを読み込みます: {latest_file}")
     df = pd.read_csv(latest_file, parse_dates=['Date'])
 
-    # 🔄 戦略読み込みと実行
+    # 🔄 戦略実行
     strategies = load_strategies()
     combined_df = pd.DataFrame(index=df['Date'])
 
@@ -345,13 +346,18 @@ def main():
         df_result.columns = [f"{name}_{col}" for col in df_result.columns]
         combined_df = combined_df.join(df_result, how='outer')
 
-    # ✅ 最終的に input から Date を復元（時刻まで一致させる）
-    df_input = pd.read_csv(latest_file, parse_dates=["Date"])
-    combined_df.reset_index(drop=True, inplace=True)
-    combined_df.insert(0, "Date", df_input["Date"])
+    # ✅ 日付とOHLCを input から直接復元（時刻を完全に維持）
+    df_input = pd.read_csv(latest_file, parse_dates=['Date'])
+    date_series = df_input['Date']
+    ohlc_df = df_input[['Open', 'High', 'Low', 'Close']].reset_index(drop=True)
 
-    # 💾 CSVに保存
-    combined_df.to_csv("result_stats.csv", index=False)
+    combined_df.reset_index(drop=True, inplace=True)
+
+    # 強制的に結合（Date, Open, High, Low, Close を先頭に）
+    final_df = pd.concat([date_series, ohlc_df, combined_df], axis=1)
+
+    # 💾 保存
+    final_df.to_csv("result_stats.csv", index=False)
     print("シミュレーション結果を 'result_stats.csv' に出力しました。")
 
 if __name__ == "__main__":

@@ -10,24 +10,33 @@ def run(df: pd.DataFrame, strategy_id: str = 'RuleB') -> pd.DataFrame:
     """
     result = pd.DataFrame({'Date': pd.to_datetime(df['Date'])})
     result.set_index('Date', inplace=True)
+
     result['Signal'] = 0
     result['Profit'] = 0.0
+
+    # ✅ マーカー列（描画のために必須）
+    result['OrderPlaced'] = 0
+    result['Executed'] = 0
+    result['LossCutTriggered'] = 0
 
     positions = deque()
 
     for i in range(len(df)):
         now = df.iloc[i]
-        now_time = pd.to_datetime(df.iloc[i]['Date'])
+        now_time = pd.to_datetime(now['Date'])
         price = now['Close']
 
-        # 新規売りポジション
-        positions.append({'entry_time': now_time, 'entry_price': price, 'quantity': 1})
-        result.at[now_time, 'Signal'] = -1
+        # 5分おきにBUY（例: indexが5の倍数）
+        if i % 5 == 0:
+            positions.append({'entry_time': now_time, 'entry_price': price, 'quantity': 1})
+            result.at[now_time, 'Signal'] = 1
+            result.at[now_time, 'OrderPlaced'] = 1
+            result.at[now_time, 'Executed'] = 1
 
-        # 3分後に決済
+        # 3分後に決済（あくまで例です）
         if len(positions) > 0 and i >= 3:
             pos = positions.popleft()
-            pnl = (pos['entry_price'] - price) * pos['quantity']
+            pnl = (price - pos['entry_price']) * pos['quantity']
             result.at[now_time, 'Profit'] = pnl
 
     return result
