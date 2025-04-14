@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 import importlib.util
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 # --- OHLC クラス ---
 class OHLC:
@@ -256,108 +257,112 @@ def build_orderbook_price_map(order_book):
     return order_price_map
 
 # --- メイン処理 ---
+def simulate_strategy(strategy_id, strategy_func, ohlc_list):
+    state = {
+        'order_book': OrderBook(),
+        'positions_df': pd.DataFrame(columns=[
+            'side', 'entry_price', 'quantity', 'entry_time', 'exit_price', 'exit_time', 'strategy_id'
+        ]),
+        'log': []
+    }
+
+    for ohlc in ohlc_list:
+        order_book = state['order_book']
+        positions_df = state['positions_df']
+
+        executed_orders = order_book.match_orders(vars(ohlc), positions_df)
+        for order in executed_orders:
+            if order.position_effect == 'open':
+                positions_df.loc[len(positions_df)] = {
+                    'side': order.side,
+                    'entry_price': order.execution_price,
+                    'quantity': order.quantity,
+                    'entry_time': order.execution_time,
+                    'exit_price': None,
+                    'exit_time': None,
+                    'strategy_id': order.strategy_id
+                }
+            elif order.position_effect == 'close':
+                mask = (
+                    positions_df['exit_time'].isna() &
+                    (positions_df['side'] != order.side) &
+                    (positions_df['strategy_id'] == order.strategy_id)
+                )
+                idx = positions_df[mask].index.min()
+                if pd.notna(idx):
+                    positions_df.at[idx, 'exit_price'] = order.execution_price
+                    positions_df.at[idx, 'exit_time'] = order.execution_time
+
+        log_entry = {
+            'Date': ohlc.time,
+            'Signal': 0,
+            'Profit': 0.0,
+            'OrderID': None,
+            'EntryOrderID': None,
+            'ExecEntryPrice': None,
+            'ExecExitPrice': None,
+            'OpenBuy': 0, 'OpenSell': 0,
+            'CloseBuy': 0, 'CloseSell': 0,
+            'StopBuy': 0, 'StopSell': 0
+        }
+
+        new_orders = strategy_func(
+            current_ohlc=ohlc,
+            positions_df=positions_df,
+            order_history=order_book.orders,
+            strategy_id=strategy_id
+        )
+
+        for order in new_orders:
+            order_book.add_order(order)
+
+            if log_entry['OrderID'] is None:
+                log_entry['OrderID'] = order.order_id
+
+            if order.position_effect == 'open':
+                log_entry['EntryOrderID'] = order.order_id
+                if order.side == 'BUY':
+                    log_entry['OpenBuy'] = 1
+                else:
+                    log_entry['OpenSell'] = 1
+            elif order.position_effect == 'close':
+                log_entry['EntryOrderID'] = order.order_id.replace('_close', '')
+                if order.side == 'BUY':
+                    log_entry['CloseBuy'] = 1
+                else:
+                    log_entry['CloseSell'] = 1
+
+        state['log'].append(log_entry)
+
+    # 戦略ごとのDataFrame作成
+    df_result = pd.DataFrame(state['log'])
+    orderbook_prices = build_orderbook_price_map(state['order_book'])
+
+    print(f"[DEBUG] 約定価格マップ ({strategy_id}):")
+    for oid, price in orderbook_prices.items():
+        print(f"  {oid} → {price}")
+
+    df_result = apply_execution_prices(df_result, orderbook_prices, strategy_id)
+    df_result = apply_statistics(df_result)
+    df_result.set_index('Date', inplace=True)
+    df_result.columns = [f"{strategy_id}_{col}" for col in df_result.columns]
+    return df_result
+
+
 def run_multi_strategy_simulation(df, strategies, orderbook_prices):
     base_df = df[['Date']].copy()
     ohlc_list = [OHLC(row.Date, row.Open, row.High, row.Low, row.Close) for row in df.itertuples(index=False)]
 
-    strategy_states = {
-        strategy_id: {
-            'order_book': OrderBook(),
-            'positions_df': pd.DataFrame(columns=[
-                'side', 'entry_price', 'quantity', 'entry_time', 'exit_price', 'exit_time', 'strategy_id'
-            ]),
-            'log': []
-        }
-        for strategy_id in strategies
-    }
+    # 並列実行（各戦略をThreadで実行）
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(simulate_strategy, strategy_id, strategy_func, ohlc_list)
+            for strategy_id, strategy_func in strategies.items()
+        ]
+        result_dfs = [f.result() for f in futures]
 
-    for ohlc in ohlc_list:
-        for strategy_id, strategy_func in strategies.items():
-            state = strategy_states[strategy_id]
-            order_book = state['order_book']
-            positions_df = state['positions_df']
-
-            executed_orders = order_book.match_orders(vars(ohlc), positions_df)
-            for order in executed_orders:
-                if order.position_effect == 'open':
-                    positions_df.loc[len(positions_df)] = {
-                        'side': order.side,
-                        'entry_price': order.execution_price,
-                        'quantity': order.quantity,
-                        'entry_time': order.execution_time,
-                        'exit_price': None,
-                        'exit_time': None,
-                        'strategy_id': order.strategy_id
-                    }
-                elif order.position_effect == 'close':
-                    mask = (
-                        positions_df['exit_time'].isna() &
-                        (positions_df['side'] != order.side) &
-                        (positions_df['strategy_id'] == order.strategy_id)
-                    )
-                    idx = positions_df[mask].index.min()
-                    if pd.notna(idx):
-                        positions_df.at[idx, 'exit_price'] = order.execution_price
-                        positions_df.at[idx, 'exit_time'] = order.execution_time
-
-            log_entry = {
-                'Date': ohlc.time,
-                'Signal': 0,
-                'Profit': 0.0,
-                'OrderID': None,
-                'EntryOrderID': None,
-                'ExecEntryPrice': None,
-                'ExecExitPrice': None,
-                'OpenBuy': 0, 'OpenSell': 0,
-                'CloseBuy': 0, 'CloseSell': 0,
-                'StopBuy': 0, 'StopSell': 0
-            }
-
-            new_orders = strategy_func(
-                current_ohlc=ohlc,
-                positions_df=positions_df,
-                order_history=order_book.orders,
-                strategy_id=strategy_id
-            )
-
-            for order in new_orders:
-                order_book.add_order(order)
-
-                if log_entry['OrderID'] is None:
-                    log_entry['OrderID'] = order.order_id
-
-                if order.position_effect == 'open':
-                    log_entry['EntryOrderID'] = order.order_id
-                    if order.side == 'BUY':
-                        log_entry['OpenBuy'] = 1
-                    else:
-                        log_entry['OpenSell'] = 1
-                elif order.position_effect == 'close':
-                    log_entry['EntryOrderID'] = order.order_id.replace('_close', '')
-                    if order.side == 'BUY':
-                        log_entry['CloseBuy'] = 1
-                    else:
-                        log_entry['CloseSell'] = 1
-
-            state['log'].append(log_entry)
-
-    # ✅ 各戦略のログを結合
-    dfs = [base_df.set_index('Date')]  # Dateでインデックスを統一
-
-    for strategy_id, state in strategy_states.items():
-        df_result = pd.DataFrame(state['log']).set_index('Date')
-        orderbook_prices = build_orderbook_price_map(state['order_book'])
-
-        print(f"[DEBUG] 約定価格マップ ({strategy_id}):")
-        for oid, price in orderbook_prices.items():
-            print(f"  {oid} → {price}")
-
-        df_result = apply_execution_prices(df_result.reset_index(), orderbook_prices, strategy_id).set_index('Date')
-        df_result = apply_statistics(df_result)
-        df_result.columns = [f"{strategy_id}_{col}" for col in df_result.columns]
-        dfs.append(df_result)
-
-    combined_df = pd.concat(dfs, axis=1).reset_index()
+    # Dateインデックスで連結
+    combined_df = pd.concat([base_df.set_index('Date')] + result_dfs, axis=1).reset_index()
     return combined_df
 
 # --- 戦略を読み込む関数 ---
