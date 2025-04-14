@@ -91,27 +91,28 @@ class OrderBook:
         for idx, order in active_orders.iterrows():
             executed_flag = False
 
-            if order['order_type'] == 'market':
+            # 注文種別ごとに処理分岐
+            if order['order_type'] == 'market': #成行（market）注文
                 self.orders.at[idx, 'status'] = 'executed'
-                self.orders.at[idx, 'execution_price'] = ohlc['close']
+                self.orders.at[idx, 'execution_price'] = ohlc['close']#終値で約定するものとする
                 self.orders.at[idx, 'execution_time'] = ohlc['time']
                 executed_flag = True
 
-            elif order['order_type'] == 'limit':
-                if order['position_effect'] == 'open':
+            elif order['order_type'] == 'limit':#指値（limit）注文
+                if order['position_effect'] == 'open':#新規建て
                     if (order['side'] == 'BUY' and ohlc['low'] <= order['price']) or \
                     (order['side'] == 'SELL' and ohlc['high'] >= order['price']):
                         self.orders.at[idx, 'status'] = 'executed'
                         self.orders.at[idx, 'execution_price'] = order['price']
                         self.orders.at[idx, 'execution_time'] = ohlc['time']
                         executed_flag = True
-                else:  # position_effect == 'close'
+                else:  # position_effect == 'close'決済
                     has_opposite = not positions_df[
                         (positions_df['exit_time'].isna()) &
                         (positions_df['side'] != order['side'])&
                         (positions_df['strategy_id'] == order['strategy_id'])
                     ].empty
-                    if has_opposite:
+                    if has_opposite:#安値よりさらに5円下まで下がらないと買戻せない → ❌ 厳しい、高値よりさらに5円上まで上がらないと売れない → ❌ 厳しい
                         if (order['side'] == 'BUY' and ohlc['low'] - 5 <= order['price']) or \
                         (order['side'] == 'SELL' and ohlc['high'] + 5 >= order['price']):
                             self.orders.at[idx, 'status'] = 'executed'
@@ -119,13 +120,13 @@ class OrderBook:
                             self.orders.at[idx, 'execution_time'] = ohlc['time']
                             executed_flag = True
 
-            elif order['order_type'] == 'stop':
+            elif order['order_type'] == 'stop':#逆指値（stop）注文
                 if not order['triggered']:
                     if (order['side'] == 'BUY' and ohlc['high'] >= order['trigger_price']) or \
                     (order['side'] == 'SELL' and ohlc['low'] <= order['trigger_price']):
                         self.orders.at[idx, 'triggered'] = True
                         self.orders.at[idx, 'status'] = 'executed'
-                        self.orders.at[idx, 'execution_price'] = ohlc['close']
+                        self.orders.at[idx, 'execution_price'] = ohlc['close']#終値で約定するものとする
                         self.orders.at[idx, 'execution_time'] = ohlc['time']
                         executed_flag = True
 
