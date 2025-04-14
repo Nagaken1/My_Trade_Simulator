@@ -1,6 +1,8 @@
 import pandas as pd
 from collections import deque
-from My_Trade_Simulator import Order
+from datetime import datetime, timedelta, time as dtime
+from My_Trade_Simulator import Order,get_trade_date
+
 # 過去価格保持用（戦略ごとにグローバルに持っても良い）
 
 
@@ -25,8 +27,11 @@ def run(current_ohlc, positions_df, order_history, strategy_id='Rule_B'):
         signal = -1  # SELL
     run.prev_close = close
 
+    trade_date_str = get_trade_date(time).strftime("%Y%m%d")
+
     if signal != 0:
-        entry_id = f"{strategy_id}_{time:%Y%m%d%H%M%S}"
+
+        entry_id = f"{strategy_id}_{trade_date_str}{time:%H%M%S}"
         order_entry = Order(
             strategy_id=strategy_id,
             side='BUY' if signal == 1 else 'SELL',

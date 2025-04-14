@@ -1,14 +1,11 @@
 import pandas as pd
 from collections import deque
-from My_Trade_Simulator import Order
+from datetime import datetime, timedelta, time as dtime
+from My_Trade_Simulator import Order,get_trade_date
 
 
 # --- 毎分呼び出される戦略関数 ---
 def run(current_ohlc, positions_df, order_history, strategy_id='Rule_A'):
-    """
-    単純な毎分 BUY → 2分後に SELL する戦略（常に1つだけポジションを持つ）
-    """
-
     """
     毎分 BUY → 1分後に SELL する単純な時間ベース戦略。
     EntryOrderIDを使ってProfitを後からマッピング可能にします。
@@ -17,8 +14,10 @@ def run(current_ohlc, positions_df, order_history, strategy_id='Rule_A'):
     time = current_ohlc.time
     close = current_ohlc.close
 
+    trade_date_str = get_trade_date(time).strftime("%Y%m%d")
+    entry_id = f"{strategy_id}_{trade_date_str}{time:%H%M%S}"
+
     # --- 新規建玉（BUY） ---
-    entry_id = f"{strategy_id}_{time:%Y%m%d%H%M%S}"
     order_entry = Order(
         strategy_id=strategy_id,
         side='BUY',
