@@ -3,7 +3,6 @@ import mplfinance as mpf
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.widgets import CheckButtons,RadioButtons
-
 def plot_candle_with_markers(df, title="Candle Chart with Strategy and Marker Toggle"):
     df = df.copy()
     df['Date'] = pd.to_datetime(df['Date'])
@@ -26,10 +25,18 @@ def plot_candle_with_markers(df, title="Candle Chart with Strategy and Marker To
     fig.autofmt_xdate()
 
     # ==== マーカー描画 ====
-    strategies = sorted(set('_'.join(col.split('_')[:2]) for col in df.columns if col.endswith('OrderPlaced')))
-    marker_types = ['OrderPlaced', 'Executed', 'LossCutTriggered']
-    colors = {'OrderPlaced': 'gray', 'Executed': 'green', 'LossCutTriggered': 'red'}
-    markers = {'OrderPlaced': 'o', 'Executed': '*', 'LossCutTriggered': 'x'}
+    marker_types = ['OpenBuy', 'OpenSell', 'CloseBuy', 'CloseSell', 'StopBuy', 'StopSell']
+    strategies = sorted(set('_'.join(col.split('_')[:2]) for col in df.columns if any(key in col for key in marker_types)))
+
+    # 色・記号・Y位置のオフセット設定
+    marker_styles = {
+        'OpenBuy': ('^', 'blue', 30),
+        'OpenSell': ('v', 'orange', 30),
+        'CloseBuy': ('^', 'green', 50),
+        'CloseSell': ('v', 'red', 50),
+        'StopBuy': ('^', 'purple', 70),
+        'StopSell': ('v', 'brown', 70)
+    }
 
     marker_lines = {s: {} for s in strategies}
 
@@ -37,18 +44,19 @@ def plot_candle_with_markers(df, title="Candle Chart with Strategy and Marker To
         for mtype in marker_types:
             col_name = f"{strategy}_{mtype}"
             if col_name in df.columns:
-                yvals = df['High'].where(df[col_name] == 1) + 20
+                marker, color, offset = marker_styles[mtype]
+                yvals = df['High'].where(df[col_name] == 1) + offset
                 line = ax.scatter(
                     mdates.date2num(df.index), yvals,
-                    marker=markers.get(mtype, 'o'),
-                    color=colors.get(mtype, 'blue'),
+                    marker=marker,
+                    color=color,
                     label=f"{strategy}_{mtype}",
                     visible=False
                 )
                 marker_lines[strategy][mtype] = line
 
     # === 状態管理 ===
-    selected_strategy = [strategies[0]]
+    selected_strategy = [strategies[0]] if strategies else ['']
     marker_flags = {m: True for m in marker_types}
 
     def update_visibility():
@@ -60,17 +68,18 @@ def plot_candle_with_markers(df, title="Candle Chart with Strategy and Marker To
         fig.canvas.draw_idle()
 
     # === ラジオボタン：戦略選択 ===
-    rax = plt.axes([0.85, 0.6, 0.13, 0.2])
-    radio = RadioButtons(rax, strategies)
+    if strategies:
+        rax = plt.axes([0.85, 0.6, 0.13, 0.3])
+        radio = RadioButtons(rax, strategies)
 
-    def on_strategy_select(label):
-        selected_strategy[0] = label
-        update_visibility()
+        def on_strategy_select(label):
+            selected_strategy[0] = label
+            update_visibility()
 
-    radio.on_clicked(on_strategy_select)
+        radio.on_clicked(on_strategy_select)
 
     # === チェックボタン：マーカー種別切り替え ===
-    cax = plt.axes([0.85, 0.3, 0.13, 0.2])
+    cax = plt.axes([0.85, 0.1, 0.13, 0.4])
     check = CheckButtons(cax, marker_types, [True] * len(marker_types))
 
     def on_marker_toggle(label):
