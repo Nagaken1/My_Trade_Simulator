@@ -1,6 +1,7 @@
 import os
 import glob
 import pandas as pd
+import numpy as np
 import importlib.util
 from collections import deque
 
@@ -181,32 +182,19 @@ class TradeStatisticsCalculator:
     @staticmethod
     def total_profit(profit_list):
         """累計損益"""
-        total = 0
-        result = []
-        for p in profit_list:
-            total += p
-            result.append(total)
-        return result
+        return np.cumsum(profit_list).tolist()
 
     @staticmethod
     def winning_rate(profit_list):
         """勝率の推移（= 勝ち数 / 総取引数）"""
-        wins = 0
-        trades = 0
-        rates = []
-
-        for p in profit_list:
-            if p > 0:
-                wins += 1
-            if p != 0:
-                trades += 1
-
-            if trades > 0:
-                rates.append(round(wins / trades, 4))
-            else:
-                rates.append(0.0)
-
-        return rates
+        profit_array = np.array(profit_list)
+        wins = (profit_array > 0).astype(int)
+        trades = (profit_array != 0).astype(int)
+        cum_wins = np.cumsum(wins)
+        cum_trades = np.cumsum(trades)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            win_rate = np.where(cum_trades > 0, cum_wins / cum_trades, 0.0)
+        return np.round(win_rate, 4).tolist()
 
     @staticmethod
     def payoff_ratio(profit_list):
@@ -224,44 +212,34 @@ class TradeStatisticsCalculator:
             elif p < 0:
                 loss_total += p
                 loss_count += 1
-
             if win_count > 0 and loss_count > 0:
                 avg_win = win_total / win_count
                 avg_loss = abs(loss_total / loss_count)
                 ratios.append(round(avg_win / avg_loss, 4))
             else:
                 ratios.append(0.0)
-
         return ratios
 
     @staticmethod
     def expected_value(winning_rate_list, payoff_ratio_list):
         """期待値の推移（= 勝率×ペイオフ − 負け率）"""
-        expected = []
-
-        for win_rate, payoff in zip(winning_rate_list, payoff_ratio_list):
-            ev = win_rate * payoff - (1 - win_rate)
-            expected.append(round(ev, 4))
-
-        return expected
+        win_rate = np.array(winning_rate_list)
+        payoff = np.array(payoff_ratio_list)
+        expected = win_rate * payoff - (1 - win_rate)
+        return np.round(expected, 4).tolist()
 
     @staticmethod
     def drawdown(profit_list):
-        dd = []
-        max_profit = 0
-        for p in profit_list:
-            max_profit = max(max_profit, p)
-            dd.append(round(max_profit - p, 4))
-        return dd
+        profits = np.array(profit_list)
+        peak = np.maximum.accumulate(profits)
+        dd = peak - profits
+        return np.round(dd, 4).tolist()
 
     @staticmethod
     def max_drawdown(drawdown_list):
-        max_dd = 0
-        max_list = []
-        for d in drawdown_list:
-            max_dd = max(max_dd, d)
-            max_list.append(max_dd)
-        return max_list
+        drawdowns = np.array(drawdown_list)
+        max_dd = np.maximum.accumulate(drawdowns)
+        return max_dd.tolist()
 
 # ====== OrderBook内の約定情報を集約して辞書化 ======
 
@@ -279,22 +257,16 @@ def build_orderbook_price_map(order_book):
 
 # --- メイン処理 ---
 def run_multi_strategy_simulation(df, strategies, orderbook_prices):
-    combined_df = pd.DataFrame({'Date': df['Date']})
+    base_df = df[['Date']].copy()
+    ohlc_list = [OHLC(row.Date, row.Open, row.High, row.Low, row.Close) for row in df.itertuples(index=False)]
 
-    # OHLCを構造化（list[OHLC]）
-    ohlc_list = [
-        OHLC(row.Date, row.Open, row.High, row.Low, row.Close)
-        for row in df.itertuples(index=False)
-    ]
-
-    # 戦略ごとの状態保持
     strategy_states = {
         strategy_id: {
             'order_book': OrderBook(),
             'positions_df': pd.DataFrame(columns=[
                 'side', 'entry_price', 'quantity', 'entry_time', 'exit_price', 'exit_time', 'strategy_id'
             ]),
-            'log': []  # ログ保持
+            'log': []
         }
         for strategy_id in strategies
     }
@@ -305,7 +277,6 @@ def run_multi_strategy_simulation(df, strategies, orderbook_prices):
             order_book = state['order_book']
             positions_df = state['positions_df']
 
-            # 約定処理
             executed_orders = order_book.match_orders(vars(ohlc), positions_df)
             for order in executed_orders:
                 if order.position_effect == 'open':
@@ -329,7 +300,6 @@ def run_multi_strategy_simulation(df, strategies, orderbook_prices):
                         positions_df.at[idx, 'exit_price'] = order.execution_price
                         positions_df.at[idx, 'exit_time'] = order.execution_time
 
-            # ログ初期化
             log_entry = {
                 'Date': ohlc.time,
                 'Signal': 0,
@@ -343,7 +313,6 @@ def run_multi_strategy_simulation(df, strategies, orderbook_prices):
                 'StopBuy': 0, 'StopSell': 0
             }
 
-            # 注文発行
             new_orders = strategy_func(
                 current_ohlc=ohlc,
                 positions_df=positions_df,
@@ -372,21 +341,23 @@ def run_multi_strategy_simulation(df, strategies, orderbook_prices):
 
             state['log'].append(log_entry)
 
-    # 結果を集約
+    # ✅ 各戦略のログを結合
+    dfs = [base_df.set_index('Date')]  # Dateでインデックスを統一
+
     for strategy_id, state in strategy_states.items():
-        df_result = pd.DataFrame(state['log'])
+        df_result = pd.DataFrame(state['log']).set_index('Date')
         orderbook_prices = build_orderbook_price_map(state['order_book'])
 
         print(f"[DEBUG] 約定価格マップ ({strategy_id}):")
         for oid, price in orderbook_prices.items():
             print(f"  {oid} → {price}")
 
-        df_result = apply_execution_prices(df_result, orderbook_prices, strategy_id)
+        df_result = apply_execution_prices(df_result.reset_index(), orderbook_prices, strategy_id).set_index('Date')
         df_result = apply_statistics(df_result)
+        df_result.columns = [f"{strategy_id}_{col}" for col in df_result.columns]
+        dfs.append(df_result)
 
-        df_result.columns = [f"{strategy_id}_{col}" if col != 'Date' else col for col in df_result.columns]
-        combined_df = pd.merge(combined_df, df_result, on='Date', how='outer')
-
+    combined_df = pd.concat(dfs, axis=1).reset_index()
     return combined_df
 
 # --- 戦略を読み込む関数 ---
