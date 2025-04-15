@@ -128,14 +128,22 @@ class OrderBook:
                             executed_flag = True
 
             elif order['order_type'] == 'stop':
-                if not order['triggered']:
+                # トリガー済みかどうかは DataFrame から直接参照する
+                triggered = self.orders.at[idx, 'triggered']
+                status = self.orders.at[idx, 'status']
+
+                if not triggered:
                     if (order['side'] == 'BUY' and ohlc['high'] >= order['trigger_price']) or \
                     (order['side'] == 'SELL' and ohlc['low'] <= order['trigger_price']):
-                        trigger_price = ohlc['high'] if order['side'] == 'BUY' else ohlc['low']
-                        self.orders.loc[idx, ['triggered', 'status', 'execution_price', 'execution_time']] = [
-                            True, 'executed', trigger_price, ohlc['time']
-                        ]
-                        executed_flag = True
+                        self.orders.at[idx, 'triggered'] = True
+                        triggered = True
+
+                if triggered and status == 'pending':
+                    exec_price = ohlc['high'] if order['side'] == 'BUY' else ohlc['low']
+                    self.orders.at[idx, 'status'] = 'executed'
+                    self.orders.at[idx, 'execution_price'] = exec_price
+                    self.orders.at[idx, 'execution_time'] = ohlc['time']
+                    executed_flag = True
 
             if executed_flag:
                 exec_order = Order(
@@ -271,14 +279,11 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
         'log': []
     }
 
-    # OHLC時間 → インデックスの対応表（for インデックス比較）
     time_index_map = {ohlc.time: i for i, ohlc in enumerate(ohlc_list)}
-
 
     for i in range(len(ohlc_list)):
         current_ohlc = ohlc_list[i]
 
-        # 前回の注文を現在バーで評価（1分遅延）
         if i > 0:
             state['order_book'].match_orders(
                 vars(current_ohlc),
@@ -287,7 +292,6 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
                 time_index_map=time_index_map
             )
 
-        # ログ初期化
         log_entry = {
             'Date': current_ohlc.time,
             'Signal': 0,
@@ -301,7 +305,6 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             'StopBuy': 0, 'StopSell': 0
         }
 
-        # 注文発行
         new_orders = strategy_func(
             current_ohlc=current_ohlc,
             positions_df=state['positions_df'],
@@ -322,14 +325,17 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
                 else:
                     log_entry['OpenSell'] = 1
             elif order.position_effect == 'close':
-                if order.side == 'BUY':
-                    log_entry['CloseBuy'] = 1
-                else:
+                if order.order_type == 'stop' and order.side == 'SELL':
+                    log_entry['StopSell'] = 1
+                elif order.side == 'SELL':
                     log_entry['CloseSell'] = 1
+                elif order.side == 'BUY':
+                    log_entry['CloseBuy'] = 1
+                elif order.order_type == 'stop' and order.side == 'BUY':
+                    log_entry['StopBuy'] = 1
 
         state['log'].append(log_entry)
 
-    # 最後のバーのあとで評価（残り注文カバー）
     dummy_ohlc = {
         'time': ohlc_list[-1].time + pd.Timedelta(minutes=1),
         'open': ohlc_list[-1].close,
@@ -339,7 +345,6 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
     }
     state['order_book'].match_orders(dummy_ohlc, state['positions_df'], len(ohlc_list), time_index_map)
 
-    # ログを DataFrame に変換
     df_result = pd.DataFrame(state['log'])
     orderbook_prices = build_orderbook_price_map(state['order_book'])
 
@@ -352,6 +357,7 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
     df_result.set_index('Date', inplace=True)
     df_result.columns = [f"{strategy_id}_{col}" for col in df_result.columns]
     return df_result
+
 
 
 def run_multi_strategy_simulation(df, strategies, orderbook_prices):
