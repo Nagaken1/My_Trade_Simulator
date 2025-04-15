@@ -267,23 +267,26 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
         current_ohlc = ohlc_list[i]
 
         log_entry = {
-            'Date': current_ohlc.time,
-            'NewBuy_OrderID': None, 'NewBuy_ExecTime': None, 'NewBuy_ExecPrice': None,
-            'NewSell_OrderID': None, 'NewSell_ExecTime': None, 'NewSell_ExecPrice': None,
-            'CloseBuy_OrderID': None, 'CloseBuy_ExecTime': None, 'CloseBuy_ExecPrice': None,
-            'CloseSell_OrderID': None, 'CloseSell_ExecTime': None, 'CloseSell_ExecPrice': None,
-            'StopBuy_OrderID': None, 'StopBuy_ExecTime': None, 'StopBuy_ExecPrice': None,
-            'StopSell_OrderID': None, 'StopSell_ExecTime': None, 'StopSell_ExecPrice': None,
-
-            # ✅ 約定専用のログ欄（Profit対象はこちら）
-            'NewBuyExec_OrderID': None, 'NewSellExec_OrderID': None,
-            'CloseBuyExec_OrderID': None, 'CloseSellExec_OrderID': None,
-            'StopBuyExec_OrderID': None, 'StopSellExec_OrderID': None,
+            "Date": current_ohlc.time,
+            # --- Buy orders ---
+            "Buy_New_OrderID": None,   "Buy_New_OrderTime": None,   "Buy_New_OrderPrice": None,
+            "Buy_New_ExecID": None,    "Buy_New_ExecTime": None,    "Buy_New_ExecPrice": None,
+            "Buy_Close_OrderID": None, "Buy_Close_OrderTime": None, "Buy_Close_OrderPrice": None,
+            "Buy_Close_ExecID": None,  "Buy_Close_ExecTime": None,  "Buy_Close_ExecPrice": None,
+            "Buy_Stop_OrderID": None,  "Buy_Stop_OrderTime": None,  "Buy_Stop_OrderPrice": None,
+            "Buy_Stop_ExecID": None,   "Buy_Stop_ExecTime": None,   "Buy_Stop_ExecPrice": None,
+            # --- Sell orders ---
+            "Sell_New_OrderID": None,   "Sell_New_OrderTime": None,   "Sell_New_OrderPrice": None,
+            "Sell_New_ExecID": None,    "Sell_New_ExecTime": None,    "Sell_New_ExecPrice": None,
+            "Sell_Close_OrderID": None, "Sell_Close_OrderTime": None, "Sell_Close_OrderPrice": None,
+            "Sell_Close_ExecID": None,  "Sell_Close_ExecTime": None,  "Sell_Close_ExecPrice": None,
+            "Sell_Stop_OrderID": None,  "Sell_Stop_OrderTime": None,  "Sell_Stop_OrderPrice": None,
+            "Sell_Stop_ExecID": None,   "Sell_Stop_ExecTime": None,   "Sell_Stop_ExecPrice": None,
         }
 
         state['log'].append(log_entry)
 
-        # 約定処理（2回目以降のみ）
+        # 約定処理（2本目以降）
         if i > 0:
             executed_now = state['order_book'].match_orders(
                 vars(current_ohlc),
@@ -293,19 +296,17 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             )
 
             for exec_order in executed_now:
-                key_prefix = "New" if exec_order.position_effect == "open" else \
-                             "Stop" if exec_order.order_type == "stop" else "Close"
-                side_key = "Buy" if exec_order.side == "BUY" else "Sell"
-                match_time = pd.to_datetime(exec_order.execution_time).floor("T")
+                side = "Buy" if exec_order.side == "BUY" else "Sell"
+                kind = "New" if exec_order.position_effect == "open" else \
+                       "Stop" if exec_order.order_type == "stop" else "Close"
 
+                match_time = pd.to_datetime(exec_order.execution_time).floor("T")
                 matched_log = next((row for row in state['log'] if row["Date"] == match_time), None)
 
                 if matched_log is not None:
-                    # ✅ 約定情報を Exec 専用フィールドに記録
-                    exec_key = f"{key_prefix}{side_key}Exec_OrderID"
-                    already_logged = any(row.get(exec_key) == exec_order.order_id for row in state['log'])
-                    if not already_logged:
-                        matched_log[exec_key] = exec_order.order_id
+                    matched_log[f"{side}_{kind}_ExecID"] = exec_order.order_id
+                    matched_log[f"{side}_{kind}_ExecTime"] = exec_order.execution_time
+                    matched_log[f"{side}_{kind}_ExecPrice"] = exec_order.execution_price
 
         # 発注処理（strategy 関数を呼ぶ）
         new_orders = strategy_func(
@@ -318,12 +319,15 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
         for order in new_orders:
             state['order_book'].add_order(order)
 
-            key_prefix = "New" if order.position_effect == "open" else \
-                         "Stop" if order.order_type == "stop" else "Close"
-            side_key = "Buy" if order.side == "BUY" else "Sell"
-            log_entry[f"{key_prefix}{side_key}_OrderID"] = order.order_id
+            side = "Buy" if order.side == "BUY" else "Sell"
+            kind = "New" if order.position_effect == "open" else \
+                   "Stop" if order.order_type == "stop" else "Close"
 
-    # ダミー処理
+            log_entry[f"{side}_{kind}_OrderID"] = order.order_id
+            log_entry[f"{side}_{kind}_OrderTime"] = order.order_time
+            log_entry[f"{side}_{kind}_OrderPrice"] = order.price
+
+    # ダミーOHLCで最終処理
     dummy_ohlc = {
         'time': ohlc_list[-1].time + pd.Timedelta(minutes=1),
         'open': ohlc_list[-1].close,
@@ -338,7 +342,7 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
     df_result["Date"] = pd.to_datetime(df_result["Date"])
     df_result.set_index("Date", inplace=True)
 
-    # ✅ Exec系 OrderID のみを対象に Profit計算
+    # Profitや統計列は後処理で結合
     df_result = apply_execution_prices(df_result, build_orderbook_price_map(state['order_book']), strategy_id)
     df_result = apply_statistics(df_result)
     df_result.columns = [f"{strategy_id}_{col}" for col in df_result.columns]
@@ -387,21 +391,23 @@ def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_
     result["Profit"] = 0.0
     result["ExecMatchKey"] = result.index.floor("T")
 
-    # --- 約定情報を記録する列マッピング
-    order_columns = [
-        ('NewBuy_OrderID', 'NewBuy_ExecTime', 'NewBuy_ExecPrice'),
-        ('NewSell_OrderID', 'NewSell_ExecTime', 'NewSell_ExecPrice'),
-        ('CloseBuy_OrderID', 'CloseBuy_ExecTime', 'CloseBuy_ExecPrice'),
-        ('CloseSell_OrderID', 'CloseSell_ExecTime', 'CloseSell_ExecPrice'),
-        ('StopBuy_OrderID', 'StopBuy_ExecTime', 'StopBuy_ExecPrice'),
-        ('StopSell_OrderID', 'StopSell_ExecTime', 'StopSell_ExecPrice'),
+    used_pairs = set()
+
+    # 約定情報を記録する対象（ExecID → 時刻・価格を書き込むカラム）
+    exec_columns = [
+        ("Buy_New_ExecID", "Buy_New_ExecTime", "Buy_New_ExecPrice"),
+        ("Buy_Close_ExecID", "Buy_Close_ExecTime", "Buy_Close_ExecPrice"),
+        ("Buy_Stop_ExecID", "Buy_Stop_ExecTime", "Buy_Stop_ExecPrice"),
+        ("Sell_New_ExecID", "Sell_New_ExecTime", "Sell_New_ExecPrice"),
+        ("Sell_Close_ExecID", "Sell_Close_ExecTime", "Sell_Close_ExecPrice"),
+        ("Sell_Stop_ExecID", "Sell_Stop_ExecTime", "Sell_Stop_ExecPrice"),
     ]
 
-    for oid_col, time_col, price_col in order_columns:
+    for exec_id_col, time_col, price_col in exec_columns:
         for idx in result.index:
-            order_id = result.at[idx, oid_col] if oid_col in result.columns else None
-            if pd.notna(order_id) and order_id in orderbook_dict:
-                order = orderbook_dict[order_id]
+            exec_id = result.at[idx, exec_id_col] if exec_id_col in result.columns else None
+            if pd.notna(exec_id) and exec_id in orderbook_dict:
+                order = orderbook_dict[exec_id]
                 exec_time_floor = pd.to_datetime(order.execution_time).floor("T")
                 match_rows = result[result["ExecMatchKey"] == exec_time_floor]
                 if not match_rows.empty:
@@ -409,35 +415,42 @@ def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_
                     result.at[mi, time_col] = order.execution_time
                     result.at[mi, price_col] = order.execution_price
 
-    # --- Profit 計算（entry と exit が別行でも対応）
+    # --- Profit 計算対象の Exit ExecID 列（BuyのExitはClose or Stop、Sellも同様）
+    exit_exec_columns = [
+        ("Buy", "Close"), ("Buy", "Stop"),
+        ("Sell", "Close"), ("Sell", "Stop")
+    ]
+
     for idx in result.index:
-        for exit_type, exit_oid_col in [('BUY', 'StopSell_OrderID'), ('BUY', 'CloseSell_OrderID'),
-                                        ('SELL', 'StopBuy_OrderID'), ('SELL', 'CloseBuy_OrderID')]:
+        for side, kind in exit_exec_columns:
+            exit_oid_col = f"{side}_{kind}_ExecID"
             exit_oid = result.at[idx, exit_oid_col] if exit_oid_col in result.columns else None
             if pd.isna(exit_oid):
                 continue
 
-            # ✅ Exitが _close 付きなら対応するEntry IDに変換
-            if isinstance(exit_oid, str) and exit_oid.endswith('_close'):
-                entry_oid = exit_oid.replace('_close', '')
-            else:
-                continue
-
-            entry_order = orderbook_dict.get(entry_oid)
             exit_order = orderbook_dict.get(exit_oid)
-
-            # ✅ すでにProfitが記録されていればスキップ（2重書き込み防止）
-            if result.at[idx, "Profit"] != 0.0:
+            if not exit_order:
                 continue
 
-            if entry_order and exit_order and entry_order.execution_price is not None and exit_order.execution_price is not None:
-                if exit_type == 'BUY':
-                    profit = exit_order.execution_price - entry_order.execution_price
-                else:
-                    profit = entry_order.execution_price - exit_order.execution_price
+            # ✅ Exit Order ID から Entry ID を明示的に逆算
+            entry_oid = exit_oid.replace("_close", "")
+            entry_order = orderbook_dict.get(entry_oid)
+            if not entry_order:
+                continue
 
+            pair_key = (entry_order.order_id, exit_order.order_id)
+            if pair_key in used_pairs:
+                continue
+
+            if entry_order.execution_price is not None and exit_order.execution_price is not None:
+                profit = (
+                    exit_order.execution_price - entry_order.execution_price
+                    if side == "Buy"
+                    else entry_order.execution_price - exit_order.execution_price
+                )
                 result.at[idx, "Profit"] = profit
-                break  # ✅ 1組見つけたら終了
+                used_pairs.add(pair_key)
+                break
 
     result.drop(columns=["ExecMatchKey"], inplace=True)
     return result

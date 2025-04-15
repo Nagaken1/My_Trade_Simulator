@@ -1,0 +1,3 @@
+[DEBUG] executed_orders:
+  #0 id=Rule_SingleTrade_LossCut_ENTRY, price=40205, time=2024-12-30 17:01:00, effect=open, side=BUY, status=executed
+  #1 id=Rule_SingleTrade_LossCut_ENTRY_close, price=40145, time=2024-12-30 17:05:00, effect=close, side=SELL, status=executed
