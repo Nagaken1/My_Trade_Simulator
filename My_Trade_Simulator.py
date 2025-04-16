@@ -37,12 +37,12 @@ class Order:
 
 # --- Position クラス ---
 class Position:
-    def __init__(self, side, price, quantity, entry_time, exit_time=None, exit_price=None):
+    def __init__(self, side, price, quantity,strategy_id, entry_time, exit_time=None, exit_price=None):
         self.side = side              # 'BUY' または 'SELL'
         self.price = price            # エントリー価格
         self.quantity = quantity      # 保有数量
+        self.strategy_id = strategy_id
         self.entry_time = entry_time  # 建玉作成時間（datetime）
-
         self.exit_time = exit_time    # 決済時間（まだ決済していなければ None）
         self.exit_price = exit_price  # 決済価格（同上）
 
@@ -93,7 +93,7 @@ class OrderBook:
             elif order.order_type == 'limit':
                 if order.position_effect == 'open':
                     if (order.side == 'BUY' and ohlc['low'] <= order.price) or \
-                       (order.side == 'SELL' and ohlc['high'] >= order.price):
+                    (order.side == 'SELL' and ohlc['high'] >= order.price):
                         order.execution_price = order.price
                         order.execution_time = ohlc['time']
                         order.status = 'executed'
@@ -105,17 +105,17 @@ class OrderBook:
                     )
                     if has_opposite:
                         if (order.side == 'BUY' and ohlc['low'] - 5 <= order.price) or \
-                           (order.side == 'SELL' and ohlc['high'] + 5 >= order.price):
+                        (order.side == 'SELL' and ohlc['high'] + 5 >= order.price):
                             order.execution_price = order.price
                             order.execution_time = ohlc['time']
                             order.status = 'executed'
                             executed_flag = True
 
-            # 逆指値（ストップ）注文
+            # ストップ注文
             elif order.order_type == 'stop':
                 if not order.triggered:
                     if (order.side == 'BUY' and ohlc['high'] >= order.trigger_price) or \
-                       (order.side == 'SELL' and ohlc['low'] <= order.trigger_price):
+                    (order.side == 'SELL' and ohlc['low'] <= order.trigger_price):
                         order.triggered = True
 
                 if order.triggered and order.status == 'pending':
@@ -127,10 +127,31 @@ class OrderBook:
             if executed_flag:
                 self.executed_orders.append(order)
                 executed.append(order)
-            else:
-                still_pending.append(order)  # まだ生きてる注文だけ残す
 
-        self.pending_orders = still_pending  # 次回以降は生存注文のみ対象
+                # 新規建玉（OPEN）の場合
+                if order.position_effect == 'open':
+                    positions.append(Position(
+                        side=order.side,
+                        price=order.execution_price,
+                        quantity=order.quantity,
+                        strategy_id=order.strategy_id,
+                        entry_time=order.execution_time
+                    ))
+
+                # ✅ 決済注文（CLOSE or STOP）の場合：対応する建玉を決済
+                elif order.position_effect == 'close':
+                    for pos in positions:
+                        if (not pos.is_closed() and
+                            pos.side != order.side and
+                            pos.strategy_id == order.strategy_id):
+                            pos.exit_price = order.execution_price
+                            pos.exit_time = order.execution_time
+                            break  # 1建玉だけ決済すればよい
+
+            else:
+                still_pending.append(order)
+
+        self.pending_orders = still_pending
         return executed
 
 # --- 統計計算クラス ---
@@ -242,6 +263,7 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             new_orders, support, resistance = strategy_func(
                 current_ohlc=current_ohlc,
                 positions=state['positions'],
+                order_book=state['order_book'],
                 strategy_id=strategy_id,
                 ohlc_history=ohlc_df_history
             )
@@ -249,6 +271,7 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             new_orders = strategy_func(
                 current_ohlc=current_ohlc,
                 positions=state['positions'],
+                order_book=state['order_book'],
                 strategy_id=strategy_id,
                 ohlc_history=ohlc_df_history
             )
