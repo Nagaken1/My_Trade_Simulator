@@ -1,4 +1,4 @@
 最新のファイルを読み込みます: Input_csv\225mini_2025_min_short.csv
 [DEBUG] エントリー発注: Rule_SingleTrade_LossCut_20241230170000
-[DEBUG] ロスカット発動: Rule_SingleTrade_LossCut_20241230170000_close at 40145
+[DEBUG] 逆指値ロスカット発注: Rule_SingleTrade_LossCut_20241230170000_close @ trigger=40150
 シミュレーション結果を 'result_stats.csv' に出力しました。

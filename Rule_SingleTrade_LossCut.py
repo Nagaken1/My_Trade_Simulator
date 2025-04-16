@@ -14,10 +14,11 @@ def run(current_ohlc, positions_df, order_history, strategy_id='Rule_SingleTrade
     ]
 
     if entry_orders.empty:
-        # ✅ 初回エントリー発注
+        # ✅ 初回エントリーと同時に逆指値ロスカットを出す
         entry_order_id = f"{strategy_id}_{time.strftime('%Y%m%d%H%M%S')}"
         stop_order_id = f"{entry_order_id}_close"
 
+        # エントリー（成行）
         entry_order = Order(
             strategy_id=strategy_id,
             side='BUY',
@@ -30,33 +31,22 @@ def run(current_ohlc, positions_df, order_history, strategy_id='Rule_SingleTrade
         entry_order.order_id = entry_order_id
         orders.append(entry_order)
         print(f"[DEBUG] エントリー発注: {entry_order_id}")
-        return orders
 
-    # ✅ エントリー済み：ロスカット判定へ
-    entry_order_row = entry_orders.iloc[0]  # 最初の建玉のみ対象（単発ルールのため）
-    entry_order_id = entry_order_row['order_id']
-    stop_order_id = f"{entry_order_id}_close"
-
-    if pd.isna(entry_order_row['execution_price']):
-        print(f"[DEBUG] エントリー約定なし → ロスカット判定スキップ")
-        return []
-
-    entry_price = entry_order_row['execution_price']
-    losscut_price = entry_price - 50
-
-    existing_ids = set(order_history['order_id'].dropna())
-    if close <= losscut_price and stop_order_id not in existing_ids:
+        # ✅ ストップロス（逆指値、trigger_price指定）
+        losscut_price = close - 50
         stop_order = Order(
             strategy_id=strategy_id,
             side='SELL',
-            price=close,
+            price=losscut_price,               # 実行価格（成行にするなら close でもOK）
             quantity=1,
             order_time=time,
-            order_type='market',
+            order_type='stop',
+            trigger_price=losscut_price,       # ✅ この価格に達したら発動
             position_effect='close'
         )
         stop_order.order_id = stop_order_id
         orders.append(stop_order)
-        print(f"[DEBUG] ロスカット発動: {stop_order_id} at {close}")
+        print(f"[DEBUG] 逆指値ロスカット発注: {stop_order_id} @ trigger={losscut_price}")
 
+        return orders
     return orders

@@ -443,11 +443,11 @@ def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_
                 continue
 
             if entry_order.execution_price is not None and exit_order.execution_price is not None:
-                profit = (
-                    exit_order.execution_price - entry_order.execution_price
-                    if side == "Buy"
-                    else entry_order.execution_price - exit_order.execution_price
-                )
+                if entry_order.side == 'BUY':
+                    profit = exit_order.execution_price - entry_order.execution_price
+                else:
+                    profit = entry_order.execution_price - exit_order.execution_price
+
                 result.at[idx, "Profit"] = profit
                 used_pairs.add(pair_key)
                 break
