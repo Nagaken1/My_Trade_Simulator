@@ -6,14 +6,14 @@ resistance_lines = []
 last_entry_index = -9999  # 重複エントリー防止用
 LOOKBACK_MINUTES = 3
 
-def run(current_ohlc, positions_df, order_history, strategy_id="Rule_PromptFollow", ohlc_history=None):
+def run(current_ohlc, positions, order_history, strategy_id="Rule_PromptFollow", ohlc_history=None):
     global support_lines, resistance_lines, last_entry_index
     orders = []
 
     time = current_ohlc.time
     index = int(time.strftime("%Y%m%d%H%M"))
 
-    # ✅ ohlc_history から3本取得し、current_ohlcと合わせて4本の履歴を作る
+    # --- 3本以上の履歴がないと判定不能 ---
     if ohlc_history is None or len(ohlc_history) < 3:
         return orders, None, None
 
@@ -28,24 +28,23 @@ def run(current_ohlc, positions_df, order_history, strategy_id="Rule_PromptFollo
     print(f"[DEBUG] 検査: Highs = {highs}, time={time}")
     print(f"[DEBUG] 検査: Lows = {lows}, time={time}")
 
-    # --- 抵抗線（山型）
+    # --- 抵抗線（山型） ---
     if highs[0] < highs[1] > highs[2]:
         resistance_lines.append(highs[1])
         print(f"[DETECTED] 抵抗線: {highs[1]} @ {time}")
 
-    # --- 支持線（谷型）
+    # --- 支持線（谷型） ---
     if lows[0] > lows[1] < lows[2]:
         support_lines.append(lows[1])
         print(f"[DETECTED] 支持線: {lows[1]} @ {time}")
 
-    # 重複エントリー防止
+    # --- 重複エントリー防止 ---
     if index == last_entry_index:
         return orders, support_lines[-1] if support_lines else None, resistance_lines[-1] if resistance_lines else None
 
-    # 建玉保有状況
-    open_pos = positions_df[positions_df['exit_time'].isna()]
-    has_buy = not open_pos[open_pos['side'] == 'BUY'].empty
-    has_sell = not open_pos[open_pos['side'] == 'SELL'].empty
+    # --- 建玉確認（リストベース） ---
+    has_buy = any(p.side == 'BUY' and not p.is_closed() for p in positions)
+    has_sell = any(p.side == 'SELL' and not p.is_closed() for p in positions)
 
     # --- 買いシグナル ---
     if resistance_lines and open4 > resistance_lines[-1] and not has_buy:
