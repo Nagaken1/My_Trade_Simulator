@@ -7,7 +7,8 @@ import importlib.util
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dtime, timedelta
-
+import time
+import importlib
 # --- OHLC クラス ---
 class OHLC:
     def __init__(self, time, open_, high, low, close):
@@ -86,78 +87,83 @@ class OrderBook:
 
     def match_orders(self, ohlc, positions_df, current_index=None, time_index_map=None):
         executed = []
-        active_orders = self.orders[self.orders['status'] == 'pending']
 
-        for idx, order in active_orders.iterrows():
+         # ✅ pending 状態の注文のみ抽出（コピーで安全に）
+        active_orders = self.orders[self.orders['status'] == 'pending'].copy()
+
+        for row in active_orders.itertuples(index=True):  # index=True で row.Index が使える
+            idx = row.Index
             executed_flag = False
 
-            order_index = time_index_map.get(order['order_time'], -1)
+            order_index = time_index_map.get(row.order_time, -1)
             if order_index >= current_index:
                 continue
 
-            if order['order_type'] == 'market':
-                exec_price = ohlc['high'] if order['side'] == 'BUY' else ohlc['low']
-                self.orders.loc[idx, ['status', 'execution_price', 'execution_time']] = [
-                    'executed', exec_price, ohlc['time']
-                ]
+            # --- 成行注文 ---
+            if row.order_type == 'market':
+                exec_price = ohlc['high'] if row.side == 'BUY' else ohlc['low']
+                self.orders.at[idx, 'status'] = 'executed'
+                self.orders.at[idx, 'execution_price'] = exec_price
+                self.orders.at[idx, 'execution_time'] = ohlc['time']
                 executed_flag = True
 
-            elif order['order_type'] == 'limit':
-                if order['position_effect'] == 'open':
-                    if (order['side'] == 'BUY' and ohlc['low'] <= order['price']) or \
-                       (order['side'] == 'SELL' and ohlc['high'] >= order['price']):
-                        self.orders.loc[idx, ['status', 'execution_price', 'execution_time']] = [
-                            'executed', order['price'], ohlc['time']
-                        ]
+            # --- 指値注文（open/close） ---
+            elif row.order_type == 'limit':
+                if row.position_effect == 'open':
+                    if (row.side == 'BUY' and ohlc['low'] <= row.price) or \
+                    (row.side == 'SELL' and ohlc['high'] >= row.price):
+                        self.orders.at[idx, 'status'] = 'executed'
+                        self.orders.at[idx, 'execution_price'] = row.price
+                        self.orders.at[idx, 'execution_time'] = ohlc['time']
                         executed_flag = True
                 else:
                     has_opposite = not positions_df[
                         (positions_df['exit_time'].isna()) &
-                        (positions_df['side'] != order['side']) &
-                        (positions_df['strategy_id'] == order['strategy_id'])
+                        (positions_df['side'] != row.side) &
+                        (positions_df['strategy_id'] == row.strategy_id)
                     ].empty
                     if has_opposite:
-                        if (order['side'] == 'BUY' and ohlc['low'] - 5 <= order['price']) or \
-                           (order['side'] == 'SELL' and ohlc['high'] + 5 >= order['price']):
-                            self.orders.loc[idx, ['status', 'execution_price', 'execution_time']] = [
-                                'executed', order['price'], ohlc['time']
-                            ]
+                        if (row.side == 'BUY' and ohlc['low'] - 5 <= row.price) or \
+                        (row.side == 'SELL' and ohlc['high'] + 5 >= row.price):
+                            self.orders.at[idx, 'status'] = 'executed'
+                            self.orders.at[idx, 'execution_price'] = row.price
+                            self.orders.at[idx, 'execution_time'] = ohlc['time']
                             executed_flag = True
 
-            elif order['order_type'] == 'stop':
-                triggered = self.orders.at[idx, 'triggered']
-                status = self.orders.at[idx, 'status']
-                if not triggered:
-                    if (order['side'] == 'BUY' and ohlc['high'] >= order['trigger_price']) or \
-                       (order['side'] == 'SELL' and ohlc['low'] <= order['trigger_price']):
+            # --- 逆指値注文（stop） ---
+            elif row.order_type == 'stop':
+                if not row.triggered:
+                    if (row.side == 'BUY' and ohlc['high'] >= row.trigger_price) or \
+                    (row.side == 'SELL' and ohlc['low'] <= row.trigger_price):
                         self.orders.at[idx, 'triggered'] = True
-                        triggered = True
-                if triggered and status == 'pending':
-                    exec_price = ohlc['high'] if order['side'] == 'BUY' else ohlc['low']
-                    self.orders.loc[idx, ['status', 'execution_price', 'execution_time']] = [
-                        'executed', exec_price, ohlc['time']
-                    ]
+
+                if row.triggered and row.status == 'pending':
+                    exec_price = ohlc['high'] if row.side == 'BUY' else ohlc['low']
+                    self.orders.at[idx, 'status'] = 'executed'
+                    self.orders.at[idx, 'execution_price'] = exec_price
+                    self.orders.at[idx, 'execution_time'] = ohlc['time']
                     executed_flag = True
 
             if executed_flag:
                 exec_order = Order(
-                    strategy_id=order['strategy_id'],
-                    side=order['side'],
-                    price=order['price'],
-                    quantity=order['quantity'],
-                    order_time=order['order_time'],
-                    order_type=order['order_type'],
-                    trigger_price=order['trigger_price'],
-                    position_effect=order['position_effect']
+                    strategy_id=row.strategy_id,
+                    side=row.side,
+                    price=row.price,
+                    quantity=row.quantity,
+                    order_time=row.order_time,
+                    order_type=row.order_type,
+                    trigger_price=row.trigger_price,
+                    position_effect=row.position_effect
                 )
                 exec_order.status = 'executed'
-                exec_order.execution_price = self.orders.loc[idx, 'execution_price']
-                exec_order.execution_time = self.orders.loc[idx, 'execution_time']
-                exec_order.order_id = order['order_id']
-                self.executed_orders.append(exec_order)  # ✅ ここで保持
+                exec_order.execution_price = self.orders.at[idx, 'execution_price']
+                exec_order.execution_time = self.orders.at[idx, 'execution_time']
+                exec_order.order_id = row.order_id
+                self.executed_orders.append(exec_order)
                 executed.append(exec_order)
 
         return executed
+
 
 # --- 統計計算クラス ---
 class TradeStatisticsCalculator:
@@ -253,6 +259,8 @@ def build_orderbook_price_map(order_book):
 
 # --- メイン処理 ---
 def simulate_strategy(strategy_id, strategy_func, ohlc_list):
+    start_time_total = time.perf_counter()
+
     state = {
         'order_book': OrderBook(),
         'positions_df': pd.DataFrame(columns=[
@@ -261,10 +269,20 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
         'log': []
     }
 
+    # --- LOOKBACK_MINUTES を戦略モジュールから取得 ---
+    strategy_module = importlib.import_module(strategy_func.__module__)
+    lookback_minutes = getattr(strategy_module, "LOOKBACK_MINUTES", 0)
+
     time_index_map = {ohlc.time: i for i, ohlc in enumerate(ohlc_list)}
 
     for i in range(len(ohlc_list)):
         current_ohlc = ohlc_list[i]
+
+        # --- 過去N本のOHLC履歴を DataFrame化 ---
+        if i >= lookback_minutes:
+            ohlc_history = pd.DataFrame([vars(ohlc_list[j]) for j in range(i - lookback_minutes, i)])
+        else:
+            ohlc_history = pd.DataFrame([])
 
         log_entry = {
             "Date": current_ohlc.time,
@@ -282,18 +300,52 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             "Sell_Close_ExecID": None,  "Sell_Close_ExecTime": None,  "Sell_Close_ExecPrice": None,
             "Sell_Stop_OrderID": None,  "Sell_Stop_OrderTime": None,  "Sell_Stop_OrderPrice": None,
             "Sell_Stop_ExecID": None,   "Sell_Stop_ExecTime": None,   "Sell_Stop_ExecPrice": None,
+
+            # --- Support / Resistance ---
+            "SupportLine": None,
+            "ResistanceLine": None,
         }
 
         state['log'].append(log_entry)
 
-        # 約定処理（2本目以降）
+        # === 戦略実行（support/resistance対応） ===
+        strategy_start = time.perf_counter()
+        try:
+            new_orders, support_line, resistance_line = strategy_func(
+                current_ohlc=current_ohlc,
+                positions_df=state['positions_df'],
+                order_history=state['order_book'].orders,
+                strategy_id=strategy_id,
+                 ohlc_history=ohlc_history
+            )
+        except ValueError:
+            new_orders = strategy_func(
+                current_ohlc=current_ohlc,
+                positions_df=state['positions_df'],
+                order_history=state['order_book'].orders,
+                strategy_id=strategy_id,
+                 ohlc_history=ohlc_history
+            )
+            support_line = None
+            resistance_line = None
+        strategy_end = time.perf_counter()
+        print(f"[TIME] {strategy_id} 戦略呼び出し: {strategy_end - strategy_start:.4f} 秒")
+
+        # === ライン記録 ===
+        log_entry["SupportLine"] = support_line
+        log_entry["ResistanceLine"] = resistance_line
+
+        # === 約定処理（2本目以降） ===
         if i > 0:
+            exec_start = time.perf_counter()
             executed_now = state['order_book'].match_orders(
                 vars(current_ohlc),
                 state['positions_df'],
                 current_index=i,
                 time_index_map=time_index_map
             )
+            exec_end = time.perf_counter()
+            print(f"[TIME] {strategy_id} 約定処理: {exec_end - exec_start:.4f} 秒")
 
             for exec_order in executed_now:
                 side = "Buy" if exec_order.side == "BUY" else "Sell"
@@ -308,14 +360,8 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
                     matched_log[f"{side}_{kind}_ExecTime"] = exec_order.execution_time
                     matched_log[f"{side}_{kind}_ExecPrice"] = exec_order.execution_price
 
-        # 発注処理（strategy 関数を呼ぶ）
-        new_orders = strategy_func(
-            current_ohlc=current_ohlc,
-            positions_df=state['positions_df'],
-            order_history=state['order_book'].orders,
-            strategy_id=strategy_id
-        )
-
+        # === 注文登録 ===
+        record_start = time.perf_counter()
         for order in new_orders:
             state['order_book'].add_order(order)
 
@@ -326,8 +372,10 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             log_entry[f"{side}_{kind}_OrderID"] = order.order_id
             log_entry[f"{side}_{kind}_OrderTime"] = order.order_time
             log_entry[f"{side}_{kind}_OrderPrice"] = order.price
+        record_end = time.perf_counter()
+        print(f"[TIME] {strategy_id} 注文記録: {record_end - record_start:.4f} 秒")
 
-    # ダミーOHLCで最終処理
+    # === ダミーOHLC処理 ===
     dummy_ohlc = {
         'time': ohlc_list[-1].time + pd.Timedelta(minutes=1),
         'open': ohlc_list[-1].close,
@@ -337,15 +385,17 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
     }
     state['order_book'].match_orders(dummy_ohlc, state['positions_df'], len(ohlc_list), time_index_map)
 
-    # DataFrame化と処理
+    # === DataFrame化・処理 ===
     df_result = pd.DataFrame(state['log'])
     df_result["Date"] = pd.to_datetime(df_result["Date"])
     df_result.set_index("Date", inplace=True)
 
-    # Profitや統計列は後処理で結合
     df_result = apply_execution_prices(df_result, build_orderbook_price_map(state['order_book']), strategy_id)
     df_result = apply_statistics(df_result)
     df_result.columns = [f"{strategy_id}_{col}" for col in df_result.columns]
+
+    end_time_total = time.perf_counter()
+    print(f"[TIME] {strategy_id} simulate_strategy 総時間: {end_time_total - start_time_total:.4f} 秒")
 
     return df_result
 

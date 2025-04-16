@@ -42,9 +42,21 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（重な�
     ax.set_xlabel("Time Index")
     ax.set_ylabel("Price")
 
+    # X軸表示ラベル
     label_interval = max(1, len(df) // 10)
     ax.set_xticks(range(0, len(df), label_interval))
     ax.set_xticklabels(df['Label'][::label_interval], rotation=45, ha='right')
+
+    # === Support / Resistance ライン描画 ===
+    if "SupportLine" in df.columns:
+        support_mask = df["SupportLine"].notna()
+        ax.plot(df.index[support_mask], df["SupportLine"][support_mask],
+                linestyle="--", color="cyan", label="Support")
+
+    if "ResistanceLine" in df.columns:
+        resistance_mask = df["ResistanceLine"].notna()
+        ax.plot(df.index[resistance_mask], df["ResistanceLine"][resistance_mask],
+                linestyle="--", color="magenta", label="Resistance")
 
     # マーカーの位置情報保持
     marker_lines_by_strategy = {}
