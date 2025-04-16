@@ -7,8 +7,7 @@ from mplfinance.original_flavor import candlestick_ohlc
 import mplfinance as mpf
 from collections import defaultdict
 
-def plot_candle_with_markers(df, title="ローソク足＋マーカー（重なり段差調整）"):
-
+def plot_candle_with_markers(df, title="ローソク足＋マーカー＋支持線/抵抗線"):
 
     marker_color_map = {
         'Buy_New_OrderTime':    ('o', 'blue'),
@@ -42,30 +41,76 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（重な�
     ax.set_xlabel("Time Index")
     ax.set_ylabel("Price")
 
-    # X軸表示ラベル
     label_interval = max(1, len(df) // 10)
     ax.set_xticks(range(0, len(df), label_interval))
     ax.set_xticklabels(df['Label'][::label_interval], rotation=45, ha='right')
 
-    # === Support / Resistance ライン描画 ===
-    if "SupportLine" in df.columns:
-        support_mask = df["SupportLine"].notna()
-        ax.plot(df.index[support_mask], df["SupportLine"][support_mask],
-                linestyle="--", color="cyan", label="Support")
+    # === 支持線・抵抗線（複数）をリストから描画 ===
+    support_yvals = set()
+    resistance_yvals = set()
 
-    if "ResistanceLine" in df.columns:
-        resistance_mask = df["ResistanceLine"].notna()
-        ax.plot(df.index[resistance_mask], df["ResistanceLine"][resistance_mask],
-                linestyle="--", color="magenta", label="Resistance")
+    for col in df.columns:
+        if col.endswith("SupportLines"):
+            for raw in df[col].dropna():
+                try:
+                    values = eval(raw) if isinstance(raw, str) else raw
+                    support_yvals.update(values)
+                except:
+                    continue
+        elif col.endswith("ResistanceLines"):
+            for raw in df[col].dropna():
+                try:
+                    values = eval(raw) if isinstance(raw, str) else raw
+                    resistance_yvals.update(values)
+                except:
+                    continue
 
-    # マーカーの位置情報保持
+    # 描画：ラインをローソク足全体の期間に渡して引く
+    x_start = 0
+    x_end = len(df) - 1
+
+    for y in support_yvals:
+        ax.hlines(y, x_start, x_end, linestyles="--", colors="cyan", label="Support")
+
+    for y in resistance_yvals:
+        ax.hlines(y, x_start, x_end, linestyles="--", colors="magenta", label="Resistance")
+
+    # --- 単一値型の SupportLine 描画（値が連続する区間ごとに線を引く） ---
+    def draw_flat_lines(series: pd.Series, color: str, label: str):
+        last_val = None
+        start_idx = None
+
+        for i, val in enumerate(series):
+            if pd.isna(val):
+                if last_val is not None and start_idx is not None:
+                    ax.hlines(last_val, start_idx, i - 1, linestyles="--", colors=color, label=label)
+                    last_val = None
+                    start_idx = None
+                continue
+
+            if val != last_val:
+                if last_val is not None and start_idx is not None:
+                    ax.hlines(last_val, start_idx, i - 1, linestyles="--", colors=color, label=label)
+                last_val = val
+                start_idx = i
+
+        if last_val is not None and start_idx is not None:
+            ax.hlines(last_val, start_idx, len(series) - 1, linestyles="--", colors=color, label=label)
+
+    # ✅ カラム名の後方一致で柔軟に対応
+    for col in df.columns:
+        if col.endswith("SupportLine"):
+            draw_flat_lines(df[col], color="cyan", label=col)
+        elif col.endswith("ResistanceLine"):
+            draw_flat_lines(df[col], color="magenta", label=col)
+
+    # === マーカー処理 ===
     marker_lines_by_strategy = {}
     all_strategies = set()
     marker_types = set()
     matched_cols = {}
 
-    # === ステップ1：マーカー位置集計（index単位）
-    marker_index_map = defaultdict(list)  # {index: [ (strategy, mtype) ]}
+    marker_index_map = defaultdict(list)
 
     for col in df.columns:
         for suffix in marker_color_map:
@@ -82,7 +127,6 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（重な�
     all_strategies = sorted(all_strategies)
     marker_types = sorted(marker_types)
 
-    # === ステップ2：マーカー描画（段差オフセット付き）
     base_offset = 10
     offset_step = 10
 
@@ -101,9 +145,8 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（重な�
                 yvals = []
                 for idx in df[mask].index:
                     row_high = df.at[idx, 'High']
-                    # そのインデックスにあるマーカーの並び順を取得
                     key_list = marker_index_map[idx]
-                    order = key_list.index((strategy, mtype))  # このマーカーが何番目か
+                    order = key_list.index((strategy, mtype))
                     offset = base_offset + offset_step * order
                     xvals.append(idx)
                     yvals.append(row_high + offset)
@@ -127,12 +170,10 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（重な�
                 line.set_visible(visible)
         fig.canvas.draw_idle()
 
-    # ラジオボタン：戦略選択
     rax = plt.axes([0.85, 0.6, 0.13, 0.2])
     radio = RadioButtons(rax, all_strategies)
     radio.on_clicked(lambda label: (selected_strategy.__setitem__(0, label), update_visibility()))
 
-    # チェックボタン：マーカー種類切り替え
     cax = plt.axes([0.85, 0.3, 0.13, 0.2])
     check = CheckButtons(cax, marker_types, [True] * len(marker_types))
     check.on_clicked(lambda label: (marker_flags.__setitem__(label, not marker_flags[label]), update_visibility()))
