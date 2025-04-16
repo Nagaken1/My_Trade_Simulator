@@ -1,12 +1,13 @@
 import pandas as pd
 from My_Trade_Simulator import Order
+import logging
 
 support_lines = []
 resistance_lines = []
 last_entry_index = -9999  # 重複エントリー防止用
 LOOKBACK_MINUTES = 3
 
-def run(current_ohlc, positions, order_history, strategy_id="Rule_PromptFollow", ohlc_history=None):
+def run(current_ohlc, positions, strategy_id="Rule_PromptFollow", ohlc_history=None):
     global support_lines, resistance_lines, last_entry_index
     orders = []
 
@@ -25,18 +26,18 @@ def run(current_ohlc, positions, order_history, strategy_id="Rule_PromptFollow",
     opens = combined["open"].values
     open4 = opens[3]
 
-    print(f"[DEBUG] 検査: Highs = {highs}, time={time}")
-    print(f"[DEBUG] 検査: Lows = {lows}, time={time}")
+    logging.debug(f"[検査] Highs = {highs}, time = {time}")
+    logging.debug(f"[検査] Lows = {lows}, time = {time}")
 
     # --- 抵抗線（山型） ---
     if highs[0] < highs[1] > highs[2]:
         resistance_lines.append(highs[1])
-        print(f"[DETECTED] 抵抗線: {highs[1]} @ {time}")
+        logging.debug(f"[DETECTED] 抵抗線: {highs[1]} @ {time}")
 
     # --- 支持線（谷型） ---
     if lows[0] > lows[1] < lows[2]:
         support_lines.append(lows[1])
-        print(f"[DETECTED] 支持線: {lows[1]} @ {time}")
+        logging.debug(f"[DETECTED] 支持線: {lows[1]} @ {time}")
 
     # --- 重複エントリー防止 ---
     if index == last_entry_index:
@@ -78,7 +79,7 @@ def run(current_ohlc, positions, order_history, strategy_id="Rule_PromptFollow",
         stop_order.order_id = stop_id
         orders.append(stop_order)
 
-        print(f"[ENTRY] 抵抗線ブレイク買い: {open4} > {resistance_lines[-1]} @ {time}")
+        logging.debug(f"[ENTRY] 抵抗線ブレイク買い: {open4} > {resistance_lines[-1]} @ {time}")
         last_entry_index = index
 
     # --- 売りシグナル ---
@@ -113,7 +114,7 @@ def run(current_ohlc, positions, order_history, strategy_id="Rule_PromptFollow",
         stop_order.order_id = stop_id
         orders.append(stop_order)
 
-        print(f"[ENTRY] 支持線ブレイク売り: {open4} < {support_lines[-1]} @ {time}")
+        logging.debug(f"[ENTRY] 支持線ブレイク売り: {open4} < {support_lines[-1]} @ {time}")
         last_entry_index = index
 
     return orders, support_lines[-1] if support_lines else None, resistance_lines[-1] if resistance_lines else None

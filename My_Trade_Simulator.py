@@ -8,7 +8,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dtime, timedelta
 import time
-import importlib
+import logging
 
 # --- OHLC クラス ---
 class OHLC:
@@ -62,21 +62,22 @@ class Position:
 # --- OrderBook クラス ---
 class OrderBook:
     def __init__(self):
-        self.orders: list[Order] = []             # 全注文（未約定・約定を含む）
-        self.executed_orders: list[Order] = []    # 約定済みのみ
+        self.orders: list[Order] = []             # 全注文（分析/記録用に保持）
+        self.executed_orders: list[Order] = []    # 約定済みのみ保持
+        self.pending_orders: list[Order] = []     # マッチ対象の未約定注文のみ
 
     def add_order(self, order: Order):
         self.orders.append(order)
+        self.pending_orders.append(order)
 
     def match_orders(self, ohlc, positions: list, current_index=None, time_index_map=None):
         executed = []
+        still_pending = []
 
-        for order in self.orders:
-            if order.status != 'pending':
-                continue
-
+        for order in self.pending_orders:
             order_index = time_index_map.get(order.order_time, -1)
             if order_index >= current_index:
+                still_pending.append(order)
                 continue
 
             executed_flag = False
@@ -110,14 +111,14 @@ class OrderBook:
                             order.status = 'executed'
                             executed_flag = True
 
-            # ストップ注文（逆指値）
+            # 逆指値（ストップ）注文
             elif order.order_type == 'stop':
                 if not order.triggered:
                     if (order.side == 'BUY' and ohlc['high'] >= order.trigger_price) or \
                        (order.side == 'SELL' and ohlc['low'] <= order.trigger_price):
                         order.triggered = True
 
-                if order.triggered:
+                if order.triggered and order.status == 'pending':
                     order.execution_price = ohlc['high'] if order.side == 'BUY' else ohlc['low']
                     order.execution_time = ohlc['time']
                     order.status = 'executed'
@@ -126,7 +127,10 @@ class OrderBook:
             if executed_flag:
                 self.executed_orders.append(order)
                 executed.append(order)
+            else:
+                still_pending.append(order)  # まだ生きてる注文だけ残す
 
+        self.pending_orders = still_pending  # 次回以降は生存注文のみ対象
         return executed
 
 # --- 統計計算クラス ---
@@ -209,8 +213,6 @@ def build_orderbook_price_map(order_book):
 
 # --- メイン処理 ---
 def simulate_strategy(strategy_id, strategy_func, ohlc_list):
-    import time
-    import importlib
     start_time_total = time.perf_counter()
 
     state = {
@@ -221,12 +223,12 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
 
     strategy_module = importlib.import_module(strategy_func.__module__)
     lookback_minutes = getattr(strategy_module, "LOOKBACK_MINUTES", 0)
+    lookback_ohlc_buffer = deque(maxlen=lookback_minutes)
     time_index_map = {ohlc.time: i for i, ohlc in enumerate(ohlc_list)}
 
     for i, current_ohlc in enumerate(ohlc_list):
         if i >= lookback_minutes:
-            hist = [vars(ohlc_list[j]) for j in range(i - lookback_minutes, i)]
-            ohlc_df_history = pd.DataFrame(hist)
+            ohlc_df_history = pd.DataFrame([vars(ohlc) for ohlc in lookback_ohlc_buffer])
         else:
             ohlc_df_history = pd.DataFrame()
 
@@ -234,12 +236,12 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
         state['log'].append(log_entry)
 
         # 戦略実行
-        order_history_df = order_list_to_dataframe(state['order_book'].orders)
+        t0 = time.perf_counter()
+
         try:
             new_orders, support, resistance = strategy_func(
                 current_ohlc=current_ohlc,
                 positions=state['positions'],
-                order_history=order_history_df,
                 strategy_id=strategy_id,
                 ohlc_history=ohlc_df_history
             )
@@ -247,22 +249,28 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             new_orders = strategy_func(
                 current_ohlc=current_ohlc,
                 positions=state['positions'],
-                order_history=order_history_df,
                 strategy_id=strategy_id,
                 ohlc_history=ohlc_df_history
             )
             support = resistance = None
 
+        t1 = time.perf_counter()
+        logging.debug(f"[TIME] {strategy_id} 戦略実行: {t1 - t0:.4f} 秒")
+
         log_entry["SupportLine"] = support
         log_entry["ResistanceLine"] = resistance
 
         if i > 0:
+            t2 = time.perf_counter()
             executed_now = state['order_book'].match_orders(
                 vars(current_ohlc),
                 state['positions'],
                 current_index=i,
                 time_index_map=time_index_map
             )
+            t3 = time.perf_counter()
+            logging.debug(f"[TIME] {strategy_id} 約定処理: {t3 - t2:.4f} 秒")
+
             for exec_order in executed_now:
                 kind = "New" if exec_order.position_effect == "open" else \
                        "Stop" if exec_order.order_type == "stop" else "Close"
@@ -275,6 +283,7 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
                     match[f"{side}_{kind}_ExecPrice"] = exec_order.execution_price
 
         # 発注登録
+        t4 = time.perf_counter()
         for order in new_orders:
             state['order_book'].add_order(order)
             kind = "New" if order.position_effect == "open" else \
@@ -283,6 +292,9 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             log_entry[f"{side}_{kind}_OrderID"] = order.order_id
             log_entry[f"{side}_{kind}_OrderTime"] = order.order_time
             log_entry[f"{side}_{kind}_OrderPrice"] = order.price
+        t5 = time.perf_counter()
+        logging.debug(f"[TIME] {strategy_id} 注文登録: {t5 - t4:.4f} 秒")
+        lookback_ohlc_buffer.append(current_ohlc)
 
     # 最終補完
     dummy = {
@@ -303,26 +315,32 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
     df_result.columns = [f"{strategy_id}_{col}" for col in df_result.columns]
 
     end_time_total = time.perf_counter()
-    print(f"[TIME] {strategy_id} simulate_strategy: {end_time_total - start_time_total:.2f} sec")
+
+
+    logging.debug(f"[TIME] {strategy_id} simulate_strategy 総時間: {end_time_total - start_time_total:.2f} 秒")
+
 
     return df_result
 
 
-def run_multi_strategy_simulation(df, strategies, orderbook_prices=None):
-
-    base_df = df[['Date']].copy()
+def run_multi_strategy_simulation(df, strategies):
     ohlc_list = [OHLC(row.Date, row.Open, row.High, row.Low, row.Close)
                  for row in df.itertuples(index=False)]
 
     with ThreadPoolExecutor() as executor:
-        futures = [
-            executor.submit(simulate_strategy, strategy_id, strategy_func, ohlc_list)
+        futures = {
+            strategy_id: executor.submit(simulate_strategy, strategy_id, strategy_func, ohlc_list)
             for strategy_id, strategy_func in strategies.items()
-        ]
-        result_dfs = [f.result() for f in futures]
+        }
 
-    combined_df = pd.concat([base_df.set_index("Date")] + result_dfs, axis=1).reset_index()
-    return combined_df
+        result_dfs = {sid: f.result() for sid, f in futures.items()}
+
+    # Dateをキーにしてマージ
+    combined = df[["Date"]].copy().set_index("Date")
+    for result_df in result_dfs.values():
+        combined = combined.join(result_df, how="left")
+
+    return combined.reset_index()
 
 # --- 戦略を読み込む関数 ---
 def load_strategies():
@@ -436,13 +454,43 @@ def get_trade_datetime(now: datetime) -> datetime:
 
 def order_list_to_dataframe(order_list: list) -> pd.DataFrame:
     """
-    List[Order] → DataFrame 変換（vars()ベース）
+    List[Order] → DataFrame に変換する
     """
-    return pd.DataFrame([vars(o) for o in order_list])
+    if not order_list:
+        return pd.DataFrame()
 
+    records = []
+    for order in order_list:
+        records.append({
+            'order_id': order.order_id,
+            'strategy_id': order.strategy_id,
+            'side': order.side,
+            'price': order.price,
+            'quantity': order.quantity,
+            'order_time': order.order_time,
+            'order_type': order.order_type,
+            'trigger_price': order.trigger_price,
+            'triggered': order.triggered,
+            'status': order.status,
+            'execution_price': order.execution_price,
+            'execution_time': order.execution_time,
+            'position_effect': order.position_effect
+        })
+
+    return pd.DataFrame(records)
 # --- 実行ブロック ---
 def main():
 
+
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='[%(levelname)s][%(asctime)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.FileHandler("debug_log.txt", encoding="utf-8"),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
     log_file_path = "debug_log.txt"
     sys.stdout = open(log_file_path, "w", encoding="utf-8")  # 以降すべての print がファイルに出力される
@@ -450,29 +498,24 @@ def main():
     # 📁 最新ファイル取得
     csv_files = glob.glob(os.path.join("Input_csv", "*.csv"))
     if not csv_files:
-        print("Input_csv フォルダに CSV ファイルが見つかりません。")
+        logging.info("Input_csv フォルダに CSV ファイルが見つかりません。")
         return
 
     latest_file = max(csv_files, key=os.path.getmtime)
-    print(f"最新のファイルを読み込みます: {latest_file}")
-    df = pd.read_csv(latest_file, parse_dates=['Date'])
-
-    # 🔄 戦略の読み込みと実行
-    strategies = load_strategies()
-    combined_df = run_multi_strategy_simulation(df, strategies, orderbook_prices={})
-
-    # ✅ 日付とOHLCを input から復元（時刻を完全に維持）
+    # ✅ 最新ファイルからDateとOHLC列だけ抽出
     df_input = pd.read_csv(latest_file, parse_dates=['Date'])
-    date_series = df_input['Date']
-    ohlc_df = df_input[['Open', 'High', 'Low', 'Close']].reset_index(drop=True)
+    base_columns = df_input[['Date', 'Open', 'High', 'Low', 'Close']]
 
-    combined_df.reset_index(drop=True, inplace=True)
+    # ✅ シミュレーション実行
+    strategies = load_strategies()
+    combined_df = run_multi_strategy_simulation(df_input, strategies)
 
-    # 💾 Date, OHLC列を先頭に挿入
-    final_df = pd.concat([date_series, ohlc_df, combined_df], axis=1)
+    # ✅ Dateでの整合を取りつつ横に合体（再index化不要）
+    final_df = pd.merge(base_columns, combined_df, on="Date", how="left")
+
+    # 💾 書き出し（index=False）
     final_df.to_csv("result_stats.csv", index=False)
-
-    print("シミュレーション結果を 'result_stats.csv' に出力しました。")
+    logging.info("シミュレーション結果を 'result_stats.csv' に出力しました。")
 
 if __name__ == "__main__":
     main()
