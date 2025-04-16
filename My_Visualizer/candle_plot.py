@@ -5,11 +5,10 @@ import matplotlib.dates as mdates
 from matplotlib.widgets import CheckButtons,RadioButtons
 from mplfinance.original_flavor import candlestick_ohlc
 import mplfinance as mpf
+from collections import defaultdict
 
-def plot_candle_with_markers(df, title="ローソク足＋マーカー（Indexベース）"):
-    import matplotlib.pyplot as plt
-    from matplotlib.widgets import CheckButtons, RadioButtons
-    from mplfinance.original_flavor import candlestick_ohlc
+def plot_candle_with_markers(df, title="ローソク足＋マーカー（重なり段差調整）"):
+
 
     marker_color_map = {
         'Buy_New_OrderTime':    ('o', 'blue'),
@@ -31,7 +30,6 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（Index�
     df['Label'] = df['Date'].dt.strftime("%m-%d %H:%M")
     df.reset_index(drop=True, inplace=True)
 
-    # OHLCデータ（X:整数Index）
     ohlc_data = [
         [i, row.Open, row.High, row.Low, row.Close]
         for i, row in df.iterrows()
@@ -44,16 +42,18 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（Index�
     ax.set_xlabel("Time Index")
     ax.set_ylabel("Price")
 
-    # X軸に文字列ラベルを付ける
     label_interval = max(1, len(df) // 10)
     ax.set_xticks(range(0, len(df), label_interval))
     ax.set_xticklabels(df['Label'][::label_interval], rotation=45, ha='right')
 
-    # マーカー描画
+    # マーカーの位置情報保持
     marker_lines_by_strategy = {}
     all_strategies = set()
     marker_types = set()
     matched_cols = {}
+
+    # === ステップ1：マーカー位置集計（index単位）
+    marker_index_map = defaultdict(list)  # {index: [ (strategy, mtype) ]}
 
     for col in df.columns:
         for suffix in marker_color_map:
@@ -63,8 +63,16 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（Index�
                 marker_types.add(suffix)
                 matched_cols[(strategy, suffix)] = col
 
+                mask = df[col].notna()
+                for idx in df[mask].index:
+                    marker_index_map[idx].append((strategy, suffix))
+
     all_strategies = sorted(all_strategies)
     marker_types = sorted(marker_types)
+
+    # === ステップ2：マーカー描画（段差オフセット付き）
+    base_offset = 10
+    offset_step = 10
 
     for strategy in all_strategies:
         marker_lines_by_strategy[strategy] = {}
@@ -77,8 +85,16 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（Index�
                 if mask.sum() == 0:
                     continue
 
-                xvals = df.index[mask]
-                yvals = df['High'][mask] + 30
+                xvals = []
+                yvals = []
+                for idx in df[mask].index:
+                    row_high = df.at[idx, 'High']
+                    # そのインデックスにあるマーカーの並び順を取得
+                    key_list = marker_index_map[idx]
+                    order = key_list.index((strategy, mtype))  # このマーカーが何番目か
+                    offset = base_offset + offset_step * order
+                    xvals.append(idx)
+                    yvals.append(row_high + offset)
 
                 line = ax.scatter(
                     xvals, yvals,
@@ -88,7 +104,7 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（Index�
                 )
                 marker_lines_by_strategy[strategy][mtype] = line
 
-    # UI：戦略とマーカー切替
+    # === UIコントロール ===
     selected_strategy = [all_strategies[0]]
     marker_flags = {m: True for m in marker_types}
 
@@ -104,7 +120,7 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー（Index�
     radio = RadioButtons(rax, all_strategies)
     radio.on_clicked(lambda label: (selected_strategy.__setitem__(0, label), update_visibility()))
 
-    # チェックボタン：マーカー種類切替
+    # チェックボタン：マーカー種類切り替え
     cax = plt.axes([0.85, 0.3, 0.13, 0.2])
     check = CheckButtons(cax, marker_types, [True] * len(marker_types))
     check.on_clicked(lambda label: (marker_flags.__setitem__(label, not marker_flags[label]), update_visibility()))
