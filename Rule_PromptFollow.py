@@ -56,7 +56,7 @@ def run(current_ohlc, positions, order_book, strategy_id="Rule_PromptFollow", oh
 
     for p in positions:
         if not p.is_closed() and p.strategy_id == strategy_id:
-            if p.side == "BUY" and support_touch_count >= 2 and previous_resistance and not p.has_limit_order:
+            if p.side == "BUY" and support_touch_count >= 2 and previous_support and not p.has_limit_order:
                 close_order = Order(
                     strategy_id=strategy_id,
                     side="SELL",
@@ -70,10 +70,10 @@ def run(current_ohlc, positions, order_book, strategy_id="Rule_PromptFollow", oh
                 close_order.order_id = f"{strategy_id}_{time.strftime('%Y%m%d%H%M%S')}_limit_close"
                 orders.append(close_order)
                 p.has_limit_order = True
-                logging.debug(f"[EXIT] 支持線2回接触 → 抵抗線で利確SELL @ {previous_resistance}")
+                logging.debug(f"[EXIT] 支持線2回接触 → 支持線で利確SELL @ {previous_support} | target_entry_id={p.entry_order_id}")
                 support_touch_count = 0
 
-            elif p.side == "SELL" and resistance_touch_count >= 2 and previous_support and not p.has_limit_order:
+            elif p.side == "SELL" and resistance_touch_count >= 2 and previous_resistance and not p.has_limit_order:
                 close_order = Order(
                     strategy_id=strategy_id,
                     side="BUY",
@@ -87,7 +87,7 @@ def run(current_ohlc, positions, order_book, strategy_id="Rule_PromptFollow", oh
                 close_order.order_id = f"{strategy_id}_{time.strftime('%Y%m%d%H%M%S')}_limit_close"
                 orders.append(close_order)
                 p.has_limit_order = True
-                logging.debug(f"[EXIT] 抵抗線2回接触 → 支持線で利確BUY @ {previous_support}")
+                logging.debug(f"[EXIT] 抵抗線2回接触 → 抵抗線で利確BUY @ {previous_resistance} | target_entry_id={p.entry_order_id}")
                 resistance_touch_count = 0
 
     open_positions = [p for p in positions if getattr(p, "strategy_id", strategy_id) == strategy_id and not p.is_closed()]

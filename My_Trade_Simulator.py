@@ -76,19 +76,70 @@ class OrderBook:
         if order.position_effect == 'close' and order.target_entry_id:
             for pos in positions:
                 if not pos.is_closed() and pos.entry_order_id == order.target_entry_id:
-                    if order.order_type == 'limit' and pos.has_limit_order:
-                        logging.debug(f"[SKIP] 利確注文はすでに存在: {order.order_id}")
-                        return
-                    if order.order_type == 'stop' and pos.has_stop_order:
-                        logging.debug(f"[SKIP] ロスカット注文はすでに存在: {order.order_id}")
-                        return
 
+                    # --- 利確注文チェック（limit） ---
                     if order.order_type == 'limit':
-                        pos.has_limit_order = True
-                    if order.order_type == 'stop':
-                        pos.has_stop_order = True
-                    break  # 対象建玉に1件だけ反映すればよい
+                        if pos.has_limit_order:
+                            candidates = [
+                                (o.order_id, o.target_entry_id, o.order_type)
+                                for o in self.pending_orders
+                                if o.order_type == 'limit'
+                            ]
+                            logging.debug(f"[DEBUG] 利確チェック候補: {candidates}")
 
+                            existing = next(
+                                (o for o in self.pending_orders
+                                if o.order_type == 'limit' and o.target_entry_id == pos.entry_order_id),
+                                None
+                            )
+
+                            if existing is None:
+                                logging.warning(
+                                    f"[WARNING] pos.has_limit_order==True だが pending_orders に一致する注文が存在しません → フラグを False に修正 | entry_id={pos.entry_order_id}"
+                                )
+                                pos.has_limit_order = False  # ✅ フラグを強制修正
+                            else:
+                                logging.debug(
+                                    f"[SKIP] 利確注文はすでに存在: 追加={order.order_id}, 既存={existing.order_id}, 対象entry_id={pos.entry_order_id}"
+                                )
+                                return
+
+                        # フラグが False ならこれから登録する注文としてOK
+                        pos.has_limit_order = True
+
+                    # --- ロスカット注文チェック（stop） ---
+                    if order.order_type == 'stop':
+                        if pos.has_stop_order:
+                            candidates = [
+                                (o.order_id, o.target_entry_id, o.order_type)
+                                for o in self.pending_orders
+                                if o.order_type == 'stop'
+                            ]
+                            logging.debug(f"[DEBUG] ロスカットチェック候補: {candidates}")
+
+                            existing = next(
+                                (o for o in self.pending_orders
+                                if o.order_type == 'stop' and o.target_entry_id == pos.entry_order_id),
+                                None
+                            )
+
+                            if existing is None:
+                                logging.warning(
+                                    f"[WARNING] pos.has_stop_order==True だが pending_orders に一致する注文が存在しません → フラグを False に修正 | entry_id={pos.entry_order_id}"
+                                )
+                                pos.has_stop_order = False  # ✅ 修正
+                            else:
+                                logging.debug(
+                                    f"[SKIP] ロスカット注文はすでに存在: 追加={order.order_id}, 既存={existing.order_id}, 対象entry_id={pos.entry_order_id}"
+                                )
+                                return
+
+                        # フラグが False ならこれから登録する注文としてOK
+                        pos.has_stop_order = True
+
+                    break  # 対象の建玉が見つかれば処理完了
+
+        # --- 注文リストに登録 ---
         self.orders.append(order)
         self.pending_orders.append(order)
 
@@ -359,8 +410,12 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
                     match[f"{side}_{kind}_ExecPrice"] = exec_order.execution_price
 
         # 発注登録
+        seen = set()
         t4 = time.perf_counter()
         for order in new_orders:
+            if order.order_id in seen:
+                logging.warning(f"[DUPLICATE] 同じ order_id が複数登録されようとしています: {order.order_id}")
+            seen.add(order.order_id)
             state['order_book'].add_order(order, state['positions'])
 
 
