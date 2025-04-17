@@ -6,6 +6,7 @@ from matplotlib.widgets import CheckButtons,RadioButtons
 from mplfinance.original_flavor import candlestick_ohlc
 import mplfinance as mpf
 from collections import defaultdict
+import mplcursors
 
 def plot_candle_with_markers(df, title="ローソク足＋マーカー＋支持線/抵抗線"):
 
@@ -177,6 +178,18 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー＋支持�
     cax = plt.axes([0.85, 0.3, 0.13, 0.2])
     check = CheckButtons(cax, marker_types, [True] * len(marker_types))
     check.on_clicked(lambda label: (marker_flags.__setitem__(label, not marker_flags[label]), update_visibility()))
+
+
+    cursor = mplcursors.cursor(ax, hover=True)
+
+    @cursor.connect("add")
+    def on_add(sel):
+        index = int(sel.target[0])  # x軸のindexから日付を逆引き
+        if 0 <= index < len(df):
+            row = df.iloc[index]
+            label = row['Date'].strftime('%Y/%m/%d %H:%M')
+            sel.annotation.set(text=label)
+
 
     update_visibility()
     plt.tight_layout()
