@@ -184,10 +184,14 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー＋支持�
 
     @cursor.connect("add")
     def on_add(sel):
-        index = int(sel.target[0])  # x軸のindexから日付を逆引き
+        index = int(sel.target[0])
         if 0 <= index < len(df):
             row = df.iloc[index]
-            label = row['Date'].strftime('%Y/%m/%d %H:%M')
+            label = (
+                f"{row['Date'].strftime('%Y/%m/%d %H:%M')}\n"
+                f"O: {row['Open']:.1f}  H: {row['High']:.1f}  "
+                f"L: {row['Low']:.1f}  C: {row['Close']:.1f}"
+            )
             sel.annotation.set(text=label)
 
 
