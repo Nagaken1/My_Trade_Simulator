@@ -11,18 +11,31 @@ import mplcursors
 def plot_candle_with_markers(df, title="ローソク足＋マーカー＋支持線/抵抗線"):
 
     marker_color_map = {
-        'Buy_New_OrderTime':    ('o', 'blue'),
-        'Buy_New_ExecTime':     ('^', 'blue'),
-        'Buy_Settlement_OrderTime':  ('s', 'blue'),
-        'Buy_Settlement_ExecTime':   ('D', 'blue'),
-        'Buy_Stop_OrderTime':   ('+', 'blue'),
-        'Buy_Stop_ExecTime':    ('x', 'blue'),
-        'Sell_New_OrderTime':   ('o', 'red'),
-        'Sell_New_ExecTime':    ('^', 'red'),
-        'Sell_Settlement_OrderTime': ('s', 'red'),
-        'Sell_Settlement_ExecTime':  ('D', 'red'),
-        'Sell_Stop_OrderTime':  ('+', 'red'),
-        'Sell_Stop_ExecTime':   ('x', 'red')
+        # --- BUY側 ---
+        'Buy_New_OrderTime':          ('o', 'blue'),  # 新規注文（発注）
+        'Buy_New_ExecTime':           ('^', 'blue'),  # 新規約定
+
+        'Buy_profitfixed_OrderTime':  ('s', 'blue'),  # 利確（指値）注文
+        'Buy_profitfixed_ExecTime':   ('D', 'blue'),  # 利確約定
+
+        'Buy_Stop_OrderTime':         ('+', 'blue'),  # ロスカット（逆指値）注文
+        'Buy_Stop_ExecTime':          ('x', 'blue'),  # ロスカット約定
+
+        'Buy_Settlement_OrderTime':   ('▼', 'blue'),  # 成行決済（発注）
+        'Buy_Settlement_ExecTime':    ('★', 'blue'),  # 成行決済（約定）
+
+        # --- SELL側 ---
+        'Sell_New_OrderTime':         ('o', 'red'),
+        'Sell_New_ExecTime':          ('^', 'red'),
+
+        'Sell_Profitfixed_OrderTime': ('s', 'red'),
+        'Sell_Profitfixed_ExecTime':  ('D', 'red'),
+
+        'Sell_Stop_OrderTime':        ('+', 'red'),
+        'Sell_Stop_ExecTime':         ('x', 'red'),
+
+        'Sell_Settlement_OrderTime':  ('▼', 'red'),
+        'Sell_Settlement_ExecTime':   ('★', 'red'),
     }
 
     df = df.copy()
@@ -156,9 +169,10 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー＋支持�
                     xvals, yvals,
                     marker=marker, color=color,
                     s=80, label=full_col,
-                    visible=False
+                    visible=True
                 )
                 marker_lines_by_strategy[strategy][mtype] = line
+                print(f"MARKER [{strategy} - {mtype}] → X: {xvals} | Y: {yvals}")
 
     # === UIコントロール ===
     selected_strategy = [all_strategies[0]]
