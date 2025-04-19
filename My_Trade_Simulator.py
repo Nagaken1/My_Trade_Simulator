@@ -21,171 +21,165 @@ class OHLC:
 
 # --- Order クラス ---
 class Order:
-    def __init__(self, side, price, quantity, order_time, order_type='limit', trigger_price=None,position_effect='open', strategy_id='default', target_entry_id=None):
+    def __init__(
+        self,
+        order_id: str,
+        strategy_id: str,
+        order_side: str,        # 'BUY' または 'SELL'
+        order_price: float,     # 指値注文の価格（マーケットなら None）
+        order_quantity: int,
+        order_time,             # datetimeオブジェクト
+        order_type: str = 'limit',  # 'limit', 'market'
+        trigger_price: float = None,  # 逆指値発動価格
+        order_effect: str = 'newie',  # 'newie' or 'settlement'
+        target_id: str = None         # 決済注文の対象建玉ID
+    ):
+        self.order_id = order_id
         self.strategy_id = strategy_id
-        self.side = side  # 'BUY' または 'SELL'
-        self.price = price  # 注文価格
-        self.quantity = quantity  # 注文数量
+        self.order_side = order_side  # 'BUY' または 'SELL'
+        self.order_price = order_price  # 注文価格
+        self.order_quantity = order_quantity  # 注文数量
         self.order_time = order_time  # 注文時刻
-        self.order_type = order_type  # 'limit', 'market', または 'stop'
-        self.trigger_price = trigger_price  # 逆指値注文の発動価格（order_type が 'stop' の場合）
-        self.triggered = False  # 逆指値注文が発動されたかどうか
-        self.status = 'pending'  # 'pending' または 'executed'
+        self.order_type = order_type  # 'limit', 'market'
+        self.trigger_price = trigger_price  # 逆指値注文の発動価格
+        self.order_effect = order_effect
+        self.target_id = target_id  # 建玉指定（決済用）
+
+        self.triggered = False  # ストップ注文の発動フラグ
+        self.status = 'pending'  # 'pending', 'executed', 'canceled'
         self.execution_price = None  # 約定価格
         self.execution_time = None  # 約定時刻
-        self.position_effect = position_effect  # 'open'（新規）または 'close'（決済）
-        self.target_entry_id = target_entry_id  # 建玉指定（決済用）
+
+        self.order_category = None  # "New", "profitfixed", "Stop" など
 
 # --- Position クラス ---
 class Position:
-    def __init__(self, side, price, quantity, strategy_id, entry_time, entry_order_id=None, exit_time=None, exit_price=None):
-        self.side = side              # 'BUY' または 'SELL'
-        self.price = price            # エントリー価格
-        self.quantity = quantity      # 保有数量
+    def __init__(
+        self,
+        order_id,                   # 新規建玉に紐づく注文ID
+        strategy_id,               # 戦略(Rule)の名前
+        position_side,             # 'BUY' または 'SELL'
+        build_price,               # エントリー価格
+        build_quantity,            # 保有数量
+        build_time,                # 建玉作成時間（datetime）
+        settlement_time=None,      # 決済時間（まだ決済していなければ None）
+        settlement_price=None      # 決済価格（同上）
+    ):
+        self.order_id = order_id
         self.strategy_id = strategy_id
-        self.entry_time = entry_time  # 建玉作成時間（datetime）
-        self.entry_order_id = entry_order_id  # 新規建玉に紐づく注文ID
-        self.exit_time = exit_time    # 決済時間（まだ決済していなければ None）
-        self.exit_price = exit_price  # 決済価格（同上）
-        self.exit_order_id = None
-        self.has_stop_order = False
-        self.has_limit_order = False
+        self.position_side = position_side
 
-    def is_closed(self):
+        self.build_price = build_price
+        self.build_quantity = build_quantity
+        self.build_time = build_time
+
+        self.settlement_order_id = None
+        self.settlement_time = settlement_time
+        self.settlement_price = settlement_price
+
+        self.profitfixed_order_id = None  # 利益確定注文ID
+        self.stoploss_order_id = None     # ロスカット注文ID
+
+    def is_settlement(self):
         """ポジションが決済済みかどうかを返す"""
-        return self.exit_time is not None
+        return self.settlement_time is not None
 
     def profit(self):
         """ポジションが決済されていれば損益を返す、されていなければ0"""
-        if not self.is_closed():
+        if not self.is_settlement():
             return 0
-        if self.side == 'BUY':
-            return (self.exit_price - self.price) * self.quantity
+        if self.position_side == 'BUY':
+            return (self.settlement_price - self.build_price) * self.build_quantity
         else:  # 'SELL'
-            return (self.price - self.exit_price) * self.quantity
+            return (self.build_price - self.settlement_price) * self.build_quantity
 
 # --- OrderBook クラス ---
 class OrderBook:
     def __init__(self):
         self.orders: list[Order] = []             # 全注文（分析/記録用に保持）
-        self.executed_orders: list[Order] = []    # 約定済みのみ保持
         self.pending_orders: list[Order] = []     # マッチ対象の未約定注文のみ
+        self.executed_orders: list[Order] = []    # 約定済みのみ保持
+        self.canceled_orders: list[Order] = []    # キャンセルされた注文を保持
         self.positions: list[Position] = []       # 建玉情報（OrderBookに保持される想定）
 
     def add_order(self, order: Order, positions: list[Position]):
-        if order.position_effect == 'close' and order.target_entry_id:
-            for pos in positions:
-                if not pos.is_closed() and pos.entry_order_id == order.target_entry_id:
+        logging.debug(f"[DEBUG][add_order] 受け取り: {order.order_id}, effect={order.order_effect}, category={getattr(order, 'order_category', '?')}")
 
-                    # --- 利確注文チェック（limit） ---
-                    if order.order_type == 'limit':
-                        if pos.has_limit_order:
-                            candidates = [
-                                (o.order_id, o.target_entry_id, o.order_type)
-                                for o in self.pending_orders
-                                if o.order_type == 'limit'
-                            ]
-                            logging.debug(f"[DEBUG] 利確チェック候補: {candidates}")
+        if order.order_effect == 'newie':
+            order.order_category = "New"
 
-                            existing = next(
-                                (o for o in self.pending_orders
-                                if o.order_type == 'limit' and o.target_entry_id == pos.entry_order_id),
-                                None
-                            )
+        elif order.order_effect == 'settlement':
+            matched_pos = next((p for p in positions if not p.is_settlement() and p.order_id == order.target_id), None)
 
-                            if existing is None:
-                                logging.warning(
-                                    f"[WARNING] pos.has_limit_order==True だが pending_orders に一致する注文が存在しません → フラグを False に修正 | entry_id={pos.entry_order_id}"
-                                )
-                                pos.has_limit_order = False  # ✅ フラグを強制修正
-                            else:
-                                logging.debug(
-                                    f"[SKIP] 利確注文はすでに存在: 追加={order.order_id}, 既存={existing.order_id}, 対象entry_id={pos.entry_order_id}"
-                                )
-                                return
+            if matched_pos:
+                logging.debug(f"[DEBUG][matched_pos] found: {matched_pos.order_id}, stoploss_id={matched_pos.stoploss_order_id}, profitfixed_id={matched_pos.profitfixed_order_id}")
 
-                        # フラグが False ならこれから登録する注文としてOK
-                        pos.has_limit_order = True
+                if order.trigger_price is not None:
+                    is_stop = (
+                        matched_pos.position_side == 'BUY' and order.order_price < matched_pos.build_price
+                    ) or (
+                        matched_pos.position_side == 'SELL' and order.order_price > matched_pos.build_price
+                    )
 
-                    # --- ロスカット注文チェック（stop） ---
-                    if order.order_type == 'stop':
-                        if pos.has_stop_order:
-                            candidates = [
-                                (o.order_id, o.target_entry_id, o.order_type)
-                                for o in self.pending_orders
-                                if o.order_type == 'stop'
-                            ]
-                            logging.debug(f"[DEBUG] ロスカットチェック候補: {candidates}")
+                    if is_stop:
+                        if matched_pos.stoploss_order_id is not None:
+                            logging.warning(f"[SKIP] ロスカット注文はすでに存在: pos_id={matched_pos.order_id}")
+                            return
+                        order.order_category = "Stop"
+                        matched_pos.stoploss_order_id = order.order_id
+                        logging.debug(f"[LINK] ロスカット注文を登録: pos_id={matched_pos.order_id} → order_id={order.order_id}")
 
-                            existing = next(
-                                (o for o in self.pending_orders
-                                if o.order_type == 'stop' and o.target_entry_id == pos.entry_order_id),
-                                None
-                            )
+                    else:
+                        if matched_pos.profitfixed_order_id is not None:
+                            logging.warning(f"[SKIP] 利確注文はすでに存在: pos_id={matched_pos.order_id}")
+                            return
+                        order.order_category = "Profitfixed"
+                        matched_pos.profitfixed_order_id = order.order_id
+                        logging.debug(f"[LINK] 利確注文を登録: pos_id={matched_pos.order_id} → order_id={order.order_id}")
+                else:
+                    order.order_category = "Settlement"
+                    logging.debug(f"[INFO] 成行による決済注文: pos_id={matched_pos.order_id} → order_id={order.order_id}")
 
-                            if existing is None:
-                                logging.warning(
-                                    f"[WARNING] pos.has_stop_order==True だが pending_orders に一致する注文が存在しません → フラグを False に修正 | entry_id={pos.entry_order_id}"
-                                )
-                                pos.has_stop_order = False  # ✅ 修正
-                            else:
-                                logging.debug(
-                                    f"[SKIP] ロスカット注文はすでに存在: 追加={order.order_id}, 既存={existing.order_id}, 対象entry_id={pos.entry_order_id}"
-                                )
-                                return
+            else:
+                order.order_category = "Settlement"
+                logging.warning(f"[CATEGORY] Settlement注文に対するポジションが見つかりませんでした: {order.order_id}")
 
-                        # フラグが False ならこれから登録する注文としてOK
-                        pos.has_stop_order = True
-
-                    break  # 対象の建玉が見つかれば処理完了
-
-        # --- 注文リストに登録 ---
+        # 最終登録
         self.orders.append(order)
         self.pending_orders.append(order)
+        logging.debug(f"[ADD_ORDER] {order.order_id}: effect={order.order_effect}, category={order.order_category}, target={order.target_id}")
+        logging.debug(f"[DEBUG][add_order] 追加成功: {order.order_id} → pending_orders")
 
     def match_orders(self, ohlc, positions: list, current_index=None, time_index_map=None):
         executed = []
         still_pending = []
 
-        # ---- パス①：新規（open）注文処理 ----
+        # ---- パス①：新規（newie）注文処理 ----
         for order in self.pending_orders:
             order_index = time_index_map.get(order.order_time, -1)
             if order_index > current_index:
+                logging.debug(f"[SKIP] 時系列不一致: {order.order_id} は future の注文扱いとしてスキップされました")
                 still_pending.append(order)
                 continue
 
-            if order.position_effect != 'open':
+            if order.order_effect != 'newie':
                 continue
 
             executed_flag = False
 
             # --- 成行注文 ---
             if order.order_type == 'market':
-                order.execution_price = ohlc['high'] if order.side == 'BUY' else ohlc['low']
+                if order.order_side == 'BUY':
+                    order.execution_price = ohlc['open'] + 5
+                else:
+                    order.execution_price = ohlc['open'] - 5
                 executed_flag = True
 
             # --- 指値注文 ---
             elif order.order_type == 'limit':
-                if (order.side == 'BUY' and ohlc['low'] <= order.price) or \
-                   (order.side == 'SELL' and ohlc['high'] >= order.price):
-                    order.execution_price = order.price
-                    executed_flag = True
-
-            # --- ストップ注文 ---
-            elif order.order_type == 'stop':
-                if not order.triggered:
-                    if (order.side == 'BUY' and ohlc['high'] >= order.trigger_price) or \
-                       (order.side == 'SELL' and ohlc['low'] <= order.trigger_price):
-                        order.triggered = True
-                if order.triggered and order.status == 'pending':
-                    has_open_position = any(
-                        not p.is_closed() and p.side != order.side and p.strategy_id == order.strategy_id
-                        for p in positions
-                    )
-                    if not has_open_position:
-                        logging.debug(f"[SKIP] STOP注文 {order.order_id} 発動するが建玉が存在しないためスキップ @ {ohlc['time']}")
-                        continue
-                    order.execution_price = ohlc['high'] if order.side == 'BUY' else ohlc['low']
+                if (order.order_side == 'BUY' and ohlc['low'] <= order.order_price) or \
+                   (order.order_side == 'SELL' and ohlc['high'] >= order.order_price):
+                    order.execution_price = order.order_price
                     executed_flag = True
 
             if executed_flag:
@@ -195,43 +189,66 @@ class OrderBook:
                 executed.append(order)
 
                 new_position = Position(
-                    side=order.side,
-                    price=order.execution_price,
-                    quantity=order.quantity,
+                    order_id=order.order_id,
                     strategy_id=order.strategy_id,
-                    entry_time=order.execution_time,
-                    entry_order_id=order.order_id
+                    position_side=order.order_side,
+                    build_price=order.execution_price,
+                    build_quantity=order.order_quantity,
+                    build_time=order.execution_time,
                 )
                 positions.append(new_position)
-                logging.debug(f"[CREATE POSITION] order_id={order.order_id}, side={order.side}, entry_time={order.execution_time}, closed={new_position.is_closed()}")
+                logging.debug(f"[CREATE POSITION] order_id={order.order_id}, side={order.order_side}, entry_time={order.execution_time}, closed={new_position.is_settlement()}")
             else:
                 still_pending.append(order)
 
-        # ---- パス②：決済（close）注文処理 ----
+        # ---- パス②：決済（settlement）注文処理 ----
         for order in self.pending_orders:
             order_index = time_index_map.get(order.order_time, -1)
-            if order_index > current_index or order.position_effect != 'close':
+            if order_index > current_index or order.order_effect != 'settlement':
                 continue
 
             executed_flag = False
-            entry_order_id = order.target_entry_id if hasattr(order, "target_entry_id") else order.order_id.replace("_close", "")
+            order_id = order.target_id if hasattr(order, "target_id") else order.order_id.replace("_settlement", "")
 
-            # --- 指値決済 ---
+            # --- 決済注文の指値判定（Stop: スリッページなし、Profitfixed: スリッページあり） ---
             if order.order_type == 'limit':
-                if (order.side == 'BUY' and ohlc['low'] <= order.price) or \
-                   (order.side == 'SELL' and ohlc['high'] >= order.price):
-                    order.execution_price = order.price
-                    executed_flag = True
+                if order.order_category == "Stop":
+                    logging.debug(f"[CHECK][STOP] {order.order_id} | Side={order.order_side} | "
+                                  f"Low={ohlc['low']}, High={ohlc['high']}, "
+                                  f"Price={order.order_price}, Category={order.order_category}, "
+                                  f"OrderTime={order.order_time}, CurrentOHLC={ohlc['time']}")
 
-            # --- ストップ決済 ---
-            elif order.order_type == 'stop':
-                if not order.triggered:
-                    if (order.side == 'BUY' and ohlc['high'] >= order.trigger_price) or \
-                       (order.side == 'SELL' and ohlc['low'] <= order.trigger_price):
-                        order.triggered = True
-                if order.triggered:
-                    order.execution_price = ohlc['high'] if order.side == 'BUY' else ohlc['low']
-                    executed_flag = True
+                    # ロスカット：スリッページなし
+                    logging.debug(f"[CHECK][STOP] {order.order_id}: High={ohlc['high']} vs Price={order.order_price}")
+                    if order.order_side == 'BUY':
+                        if ohlc['high'] >= order.order_price:
+                            order.execution_price = order.order_price
+                            executed_flag = True
+                    elif order.order_side == 'SELL':
+                        if ohlc['low'] <= order.order_price:
+                            order.execution_price = order.order_price
+                            executed_flag = True
+
+                elif order.order_category == "Profitfixed":
+                    # 利確：スリッページ5円必要
+                    logging.debug(f"[CHECK][PROFIT] {order.order_id}: High={ohlc['high']} vs Price+5={order.order_price + 5}")
+                    if order.order_side == 'BUY':
+                            if order.order_side == 'BUY':
+                                if ohlc['low'] <= order.order_price - 5:
+                                    order.execution_price = order.order_price
+                                    executed_flag = True
+                            elif order.order_side == 'SELL':
+                                if ohlc['high'] >= order.order_price + 5:
+                                    order.execution_price = order.order_price
+                                    executed_flag = True
+
+            # --- スリッページ付き成行決済判定 ---
+            elif order.order_type == 'market':
+                if order.order_side == 'BUY':
+                    order.execution_price = ohlc['open'] + 5
+                elif order.order_side == 'SELL':
+                    order.execution_price = ohlc['open'] - 5
+                executed_flag = True
 
             if executed_flag:
                 order.execution_time = ohlc['time']
@@ -241,22 +258,41 @@ class OrderBook:
 
                 matched = False
                 for pos in positions:
-                    if not pos.is_closed() and pos.entry_order_id == entry_order_id:
-                        pos.exit_price = order.execution_price
-                        pos.exit_time = order.execution_time
-                        pos.exit_order_id = order.order_id
-                        pos.has_limit_order = False
-                        pos.has_stop_order = False
+                    if not pos.is_settlement() and pos.order_id == order_id:
+                        pos.settlement_price = order.execution_price
+                        pos.settlement_time = order.execution_time
+                        pos.settlement_order_id = order.order_id
+
+                        #  OCOキャンセル処理
+                        if order.order_category == "Stop" and pos.profitfixed_order_id:
+                            self.cancel_order_by_id(pos.profitfixed_order_id)
+                        elif order.order_category == "Profitfixed" and pos.stoploss_order_id:
+                            self.cancel_order_by_id(pos.stoploss_order_id)
+
                         matched = True
-                        logging.debug(f"[CLOSE MATCHED] {order.order_id} が建玉 {pos.entry_order_id} を決済しました（価格={order.execution_price}, 時刻={order.execution_time}）")
+                        logging.debug(f"[CLOSE MATCHED] {order.order_id} が建玉 {pos.order_id} を決済しました（価格={order.execution_price}, 時刻={order.execution_time}）")
                         break
                 if not matched:
+                    logging.debug(f"[MISS] 約定せず: {order.order_id} ({order.order_category}) Price={order.order_price}, High={ohlc['high']}, Low={ohlc['low']}")
                     logging.warning(f"[WARNING] 決済注文 {order.order_id} は約定されたが、対象建玉が見つかりませんでした")
             else:
                 still_pending.append(order)
 
         self.pending_orders = still_pending
         return executed
+
+    def cancel_order_by_id(self, cancel_id: str):
+        """
+        指定した order_id の注文をキャンセル処理する。
+        pending_orders から削除し、canceled_orders に移動する。
+        """
+        for i, o in enumerate(self.pending_orders):
+            if o.order_id == cancel_id:
+                o.status = 'canceled'
+                self.canceled_orders.append(o)
+                del self.pending_orders[i]
+                logging.info(f"[CANCEL] OCOでキャンセルされた注文: {cancel_id}")
+                break
 
 # --- 統計計算クラス ---
 class TradeStatisticsCalculator:
@@ -399,9 +435,12 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
             logging.debug(f"[TIME] {strategy_id} 約定処理: {t3 - t2:.4f} 秒")
 
             for exec_order in executed_now:
-                kind = "New" if exec_order.position_effect == "open" else \
-                       "Stop" if exec_order.order_type == "stop" else "Close"
-                side = "Buy" if exec_order.side == "BUY" else "Sell"
+                if exec_order.order_effect == "newie":
+                    kind = "New"
+                elif exec_order.order_effect == "settlement":
+                    kind = exec_order.order_category
+
+                side = "Buy" if exec_order.order_side == "BUY" else "Sell"
                 t = pd.to_datetime(exec_order.execution_time).floor("T")
                 match = next((r for r in state['log'] if r["Date"] == t), None)
                 if match:
@@ -409,30 +448,65 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
                     match[f"{side}_{kind}_ExecTime"] = exec_order.execution_time
                     match[f"{side}_{kind}_ExecPrice"] = exec_order.execution_price
 
-        # 発注登録
-        seen = set()
-        t4 = time.perf_counter()
-        for order in new_orders:
-            if order.order_id in seen:
-                logging.warning(f"[DUPLICATE] 同じ order_id が複数登録されようとしています: {order.order_id}")
-            seen.add(order.order_id)
-            state['order_book'].add_order(order, state['positions'])
+            # 発注登録（newie → settlement の順に登録）
+            seen = set()
+            t4 = time.perf_counter()
 
+            # ✅ 先に newie を登録して Position を確保
+            for order in new_orders:
+                if order.order_id in seen:
+                    logging.warning(f"[DUPLICATE] 同じ order_id が複数登録されようとしています: {order.order_id}")
+                seen.add(order.order_id)
 
-            logging.debug(
-                f"[ORDER ISSUED] {order.order_id} | strategy={order.strategy_id} | "
-                f"{order.position_effect.upper()} {order.side} | "
-                f"price={order.price}, type={order.order_type}, time={order.order_time}"
-            )
+                if order.order_effect == "newie":
+                    state['order_book'].add_order(order, state['positions'])
 
-            kind = "New" if order.position_effect == "open" else \
-                   "Stop" if order.order_type == "stop" else "Close"
-            side = "Buy" if order.side == "BUY" else "Sell"
-            log_entry[f"{side}_{kind}_OrderID"] = order.order_id
-            log_entry[f"{side}_{kind}_OrderTime"] = order.order_time
-            log_entry[f"{side}_{kind}_OrderPrice"] = order.price
-        t5 = time.perf_counter()
-        logging.debug(f"[TIME] {strategy_id} 注文登録: {t5 - t4:.4f} 秒")
+                    logging.debug(
+                        f"[ORDER ISSUED] {order.order_id} | strategy={order.strategy_id} | "
+                        f"{order.order_effect.upper()} {order.order_side} | "
+                        f"price={order.order_price}, type={order.order_type}, time={order.order_time}"
+                    )
+
+                    kind = "New"
+                    side = "Buy" if order.order_side == "BUY" else "Sell"
+                    log_entry[f"{side}_{kind}_OrderID"] = order.order_id
+                    log_entry[f"{side}_{kind}_OrderTime"] = order.order_time
+                    log_entry[f"{side}_{kind}_OrderPrice"] = order.order_price
+
+            # ✅ 次に settlement を登録（positions に依存するため）
+            for order in new_orders:
+                if order.order_effect == "settlement":
+                    state['order_book'].add_order(order, state['positions'])
+
+                    logging.debug(
+                        f"[ORDER ISSUED] {order.order_id} | strategy={order.strategy_id} | "
+                        f"{order.order_effect.upper()} {order.order_side} | "
+                        f"price={order.order_price}, type={order.order_type}, time={order.order_time}"
+                    )
+
+                    kind = order.order_category
+                    side = "Buy" if order.order_side == "BUY" else "Sell"
+                    log_entry[f"{side}_{kind}_OrderID"] = order.order_id
+                    log_entry[f"{side}_{kind}_OrderTime"] = order.order_time
+                    log_entry[f"{side}_{kind}_OrderPrice"] = order.order_price
+
+            t5 = time.perf_counter()
+            logging.debug(f"[TIME] {strategy_id} 注文登録: {t5 - t4:.4f} 秒")
+
+        # ✅ キャンセル注文をログに記録
+        for canceled_order in state['order_book'].canceled_orders:
+            t = pd.to_datetime(canceled_order.order_time).floor("T")
+            match = next((r for r in state['log'] if r["Date"] == t), None)
+            if match is not None:
+                if canceled_order.order_effect == "newie":
+                    kind = "New"
+                elif canceled_order.order_effect == "settlement":
+                    kind = canceled_order.order_category
+
+                side = "Buy" if canceled_order.order_side == "BUY" else "Sell"
+                match[f"{side}_{kind}_CancelID"] = canceled_order.order_id
+                match[f"{side}_{kind}_CancelTime"] = canceled_order.order_time
+
         lookback_ohlc_buffer.append(current_ohlc)
 
     # 最終補完
@@ -455,12 +529,9 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
 
     end_time_total = time.perf_counter()
 
-
     logging.debug(f"[TIME] {strategy_id} simulate_strategy 総時間: {end_time_total - start_time_total:.2f} 秒")
 
-
     return df_result
-
 
 def run_multi_strategy_simulation(df, strategies):
     ohlc_list = [OHLC(row.Date, row.Open, row.High, row.Low, row.Close)
@@ -514,10 +585,10 @@ def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_
     # 約定情報を記録する対象（ExecID → 時刻・価格を書き込むカラム）
     exec_columns = [
         ("Buy_New_ExecID", "Buy_New_ExecTime", "Buy_New_ExecPrice"),
-        ("Buy_Close_ExecID", "Buy_Close_ExecTime", "Buy_Close_ExecPrice"),
+        ("Buy_Settlement_ExecID", "Buy_Settlement_ExecTime", "Buy_Settlement_ExecPrice"),
         ("Buy_Stop_ExecID", "Buy_Stop_ExecTime", "Buy_Stop_ExecPrice"),
         ("Sell_New_ExecID", "Sell_New_ExecTime", "Sell_New_ExecPrice"),
-        ("Sell_Close_ExecID", "Sell_Close_ExecTime", "Sell_Close_ExecPrice"),
+        ("Sell_Settlement_ExecID", "Sell_Settlement_ExecTime", "Sell_Settlement_ExecPrice"),
         ("Sell_Stop_ExecID", "Sell_Stop_ExecTime", "Sell_Stop_ExecPrice"),
     ]
 
@@ -535,8 +606,8 @@ def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_
 
     # --- Profit 計算対象の Exit ExecID 列（BuyのExitはClose or Stop、Sellも同様）
     exit_exec_columns = [
-        ("Buy", "Close"), ("Buy", "Stop"),
-        ("Sell", "Close"), ("Sell", "Stop")
+        ("Buy", "Settlement"), ("Buy", "Stop"),
+        ("Sell", "Settlement"), ("Sell", "Stop")
     ]
 
     for idx in result.index:
@@ -550,8 +621,14 @@ def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_
             if not exit_order:
                 continue
 
-            # ✅ Exit Order ID から Entry ID を明示的に逆算
-            entry_oid = exit_oid.replace("_close", "")
+            # ✅ Exit Order ID から Entry ID を明示的に逆算（_stop または _settlement）
+            if exit_oid.endswith("_stop"):
+                entry_oid = exit_oid.replace("_stop", "_entry")
+            elif exit_oid.endswith("_settlement"):
+                entry_oid = exit_oid.replace("_settlement", "_entry")
+            else:
+                continue
+
             entry_order = orderbook_dict.get(entry_oid)
             if not entry_order:
                 continue
@@ -561,7 +638,7 @@ def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_
                 continue
 
             if entry_order.execution_price is not None and exit_order.execution_price is not None:
-                if entry_order.side == 'BUY':
+                if entry_order.order_side == 'BUY':
                     profit = exit_order.execution_price - entry_order.execution_price
                 else:
                     profit = entry_order.execution_price - exit_order.execution_price

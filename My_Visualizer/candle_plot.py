@@ -13,14 +13,14 @@ def plot_candle_with_markers(df, title="ローソク足＋マーカー＋支持�
     marker_color_map = {
         'Buy_New_OrderTime':    ('o', 'blue'),
         'Buy_New_ExecTime':     ('^', 'blue'),
-        'Buy_Close_OrderTime':  ('s', 'blue'),
-        'Buy_Close_ExecTime':   ('D', 'blue'),
+        'Buy_Settlement_OrderTime':  ('s', 'blue'),
+        'Buy_Settlement_ExecTime':   ('D', 'blue'),
         'Buy_Stop_OrderTime':   ('+', 'blue'),
         'Buy_Stop_ExecTime':    ('x', 'blue'),
         'Sell_New_OrderTime':   ('o', 'red'),
         'Sell_New_ExecTime':    ('^', 'red'),
-        'Sell_Close_OrderTime': ('s', 'red'),
-        'Sell_Close_ExecTime':  ('D', 'red'),
+        'Sell_Settlement_OrderTime': ('s', 'red'),
+        'Sell_Settlement_ExecTime':  ('D', 'red'),
         'Sell_Stop_OrderTime':  ('+', 'red'),
         'Sell_Stop_ExecTime':   ('x', 'red')
     }
