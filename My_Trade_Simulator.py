@@ -52,6 +52,8 @@ class Order:
 
         self.order_category = None  # "New", "profitfixed", "Stop" など
 
+        self.cancel_time = None # キャンセルされた時刻を記録する
+
 # --- Position クラス ---
 class Position:
     def __init__(
@@ -232,15 +234,16 @@ class OrderBook:
                 elif order.order_category == "Profitfixed":
                     # 利確：スリッページ5円必要
                     logging.debug(f"[CHECK][PROFIT] {order.order_id}: High={ohlc['high']} vs Price+5={order.order_price + 5}")
+                    logging.debug(f"[CHECK][CATEGORY DISPATCH] {order.order_id}: category={order.order_category}")
+
                     if order.order_side == 'BUY':
-                            if order.order_side == 'BUY':
-                                if ohlc['low'] <= order.order_price - 5:
-                                    order.execution_price = order.order_price
-                                    executed_flag = True
-                            elif order.order_side == 'SELL':
-                                if ohlc['high'] >= order.order_price + 5:
-                                    order.execution_price = order.order_price
-                                    executed_flag = True
+                        if ohlc['low'] <= order.order_price - 5:
+                            order.execution_price = order.order_price
+                            executed_flag = True
+                    elif order.order_side == 'SELL':
+                        if ohlc['high'] >= order.order_price + 5:
+                            order.execution_price = order.order_price
+                            executed_flag = True
 
             # --- スリッページ付き成行決済判定 ---
             elif order.order_type == 'market':
@@ -256,43 +259,58 @@ class OrderBook:
                 self.executed_orders.append(order)
                 executed.append(order)
 
+                order_id = getattr(order, "target_id", order.order_id.replace("_settlement", ""))
+
                 matched = False
                 for pos in positions:
-                    if not pos.is_settlement() and pos.order_id == order_id:
-                        pos.settlement_price = order.execution_price
-                        pos.settlement_time = order.execution_time
-                        pos.settlement_order_id = order.order_id
+                    if not pos.is_settlement():
+                        # 精密に照合（完全一致）＋ デバッグログ
+                        if pos.order_id == order_id:
+                            logging.debug(f"[MATCH] order {order.order_id} → matched with pos {pos.order_id}")
+                            pos.settlement_price = order.execution_price
+                            pos.settlement_time = order.execution_time
+                            pos.settlement_order_id = order.order_id
 
-                        #  OCOキャンセル処理
-                        if order.order_category == "Stop" and pos.profitfixed_order_id:
-                            self.cancel_order_by_id(pos.profitfixed_order_id)
-                        elif order.order_category == "Profitfixed" and pos.stoploss_order_id:
-                            self.cancel_order_by_id(pos.stoploss_order_id)
+                            # OCOキャンセル処理
+                            if order.order_category == "Stop" and pos.profitfixed_order_id:
+                                self.cancel_order_by_id(pos.profitfixed_order_id, triggered_by=order.order_id, cancel_time=ohlc['time'])
+                            elif order.order_category == "Profitfixed" and pos.stoploss_order_id:
+                                self.cancel_order_by_id(pos.stoploss_order_id, triggered_by=order.order_id, cancel_time=ohlc['time'])
 
-                        matched = True
-                        logging.debug(f"[CLOSE MATCHED] {order.order_id} が建玉 {pos.order_id} を決済しました（価格={order.execution_price}, 時刻={order.execution_time}）")
-                        break
+                            matched = True
+                            logging.debug(f"[CLOSE MATCHED] {order.order_id} が建玉 {pos.order_id} を決済しました（価格={order.execution_price}, 時刻={order.execution_time}）")
+                            break
+                        else:
+                            logging.debug(f"[MISMATCH] order {order.order_id} vs pos {pos.order_id}")
+
                 if not matched:
-                    logging.debug(f"[MISS] 約定せず: {order.order_id} ({order.order_category}) Price={order.order_price}, High={ohlc['high']}, Low={ohlc['low']}")
-                    logging.warning(f"[WARNING] 決済注文 {order.order_id} は約定されたが、対象建玉が見つかりませんでした")
+                    logging.warning(f"[WARNING] 決済注文 {order.order_id} は約定されたが、対象建玉が見つかりませんでした (target_id={order_id})")
             else:
                 still_pending.append(order)
 
         self.pending_orders = still_pending
+        # --- すべての処理が終わったあと、まだ pending に残っている注文を記録 ---
+        for order in still_pending:
+            logging.debug(f"[PENDING] 注文未約定のまま継続中: {order.order_id}, category={order.order_category}, time={order.order_time}, status={order.status}")
         return executed
 
-    def cancel_order_by_id(self, cancel_id: str):
+    def cancel_order_by_id(self, cancel_id: str, triggered_by: str = "",cancel_time: datetime= None):
         """
         指定した order_id の注文をキャンセル処理する。
         pending_orders から削除し、canceled_orders に移動する。
         """
-        for i, o in enumerate(self.pending_orders):
-            if o.order_id == cancel_id:
-                o.status = 'canceled'
-                self.canceled_orders.append(o)
-                del self.pending_orders[i]
-                logging.info(f"[CANCEL] OCOでキャンセルされた注文: {cancel_id}")
+        canceled = False
+        for order in self.pending_orders:
+            if order.order_id == cancel_id:
+                order.cancel_time = cancel_time
+                order.status = 'canceled'
+                self.canceled_orders.append(order)
+                self.pending_orders.remove(order)
+                canceled = True
+                logging.info(f"[CANCEL] OCOキャンセル: {cancel_id} が {triggered_by} によってキャンセルされました")
                 break
+        if not canceled:
+            logging.warning(f"[CANCEL] キャンセル対象の注文が見つかりませんでした: {cancel_id}")
 
 # --- 統計計算クラス ---
 class TradeStatisticsCalculator:
@@ -495,7 +513,7 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
 
         # ✅ キャンセル注文をログに記録
         for canceled_order in state['order_book'].canceled_orders:
-            t = pd.to_datetime(canceled_order.order_time).floor("T")
+            t = pd.to_datetime(canceled_order.cancel_time).floor("T")
             match = next((r for r in state['log'] if r["Date"] == t), None)
             if match is not None:
                 if canceled_order.order_effect == "newie":
@@ -505,7 +523,7 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
 
                 side = "Buy" if canceled_order.order_side == "BUY" else "Sell"
                 match[f"{side}_{kind}_CancelID"] = canceled_order.order_id
-                match[f"{side}_{kind}_CancelTime"] = canceled_order.order_time
+                match[f"{side}_{kind}_CancelTime"] = canceled_order.cancel_time
 
         lookback_ohlc_buffer.append(current_ohlc)
 
