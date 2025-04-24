@@ -72,7 +72,7 @@ def run(current_ohlc, positions, order_book, strategy_id="Rule_PromptFollow", oh
             profit_price = build_price + 25 if side == "BUY" else build_price - 25
 
             stop_id = f"{strategy_id}_{time.strftime('%Y%m%d%H%M%S')}_stop"
-            profit_id = f"{strategy_id}_{time.strftime('%Y%m%d%H%M%S')}_profit"
+            profit_id = f"{strategy_id}_{time.strftime('%Y%m%d%H%M%S')}_profitfixed"
 
             stop_order = Order(
                 order_id=stop_id,

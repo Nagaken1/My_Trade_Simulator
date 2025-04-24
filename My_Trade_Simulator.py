@@ -82,6 +82,8 @@ class Position:
         self.profitfixed_order_id = None  # 利益確定注文ID
         self.stoploss_order_id = None     # ロスカット注文ID
 
+        self.realized_profit = None  # ✅ 損益（決済完了時に記録される）
+
     def is_settlement(self):
         """ポジションが決済済みかどうかを返す"""
         return self.settlement_time is not None
@@ -270,6 +272,16 @@ class OrderBook:
                             pos.settlement_price = order.execution_price
                             pos.settlement_time = order.execution_time
                             pos.settlement_order_id = order.order_id
+
+                            # --- 即時損益計算 ---
+                            if pos.position_side == 'BUY':
+                                gross_profit = pos.settlement_price - pos.build_price
+                            else:
+                                gross_profit = pos.build_price - pos.settlement_price
+
+                            # 日経225mini → 100倍レバレッジ、手数料は固定77円
+                            net_profit = gross_profit * 100 - 77
+                            pos.realized_profit = net_profit
 
                             # OCOキャンセル処理
                             if order.order_category == "Stop" and pos.profitfixed_order_id:
@@ -466,6 +478,24 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
                     match[f"{side}_{kind}_ExecTime"] = exec_order.execution_time
                     match[f"{side}_{kind}_ExecPrice"] = exec_order.execution_price
 
+                    # --- Profit を即時ログに記録（settlement のみ）---
+                    if exec_order.order_effect == "settlement":
+                        matched_pos = next((p for p in state["positions"]
+                                            if p.settlement_order_id == exec_order.order_id), None)
+
+                        if matched_pos:
+                            logging.debug(f"[PROFIT_CHECK] matched_pos found: {matched_pos.order_id}, profit={matched_pos.realized_profit}")
+                            if matched_pos.realized_profit is not None:
+                                match[f"{strategy_id}_Profit"] = matched_pos.realized_profit
+                                logging.debug(f"[PROFIT_LOGGED] Profit logged: {matched_pos.realized_profit} @ {t}")
+                            else:
+                                logging.warning(f"[PROFIT_MISSING] matched_pos {matched_pos.order_id} has no realized_profit")
+                        else:
+                            logging.warning(f"[PROFIT_MISSING] No position matched for order {exec_order.order_id}")
+
+                        if matched_pos and matched_pos.realized_profit is not None:
+                            match[f"{strategy_id}_Profit"] = matched_pos.realized_profit
+
             # 発注登録（newie → settlement の順に登録）
             seen = set()
             t4 = time.perf_counter()
@@ -541,9 +571,12 @@ def simulate_strategy(strategy_id, strategy_func, ohlc_list):
     df_result = pd.DataFrame(state['log'])
     df_result["Date"] = pd.to_datetime(df_result["Date"])
     df_result.set_index("Date", inplace=True)
-    df_result = apply_execution_prices(df_result, build_orderbook_price_map(state['order_book']), strategy_id)
+    #df_result = apply_execution_prices(df_result, build_orderbook_price_map(state['order_book']), strategy_id)
     df_result = apply_statistics(df_result)
-    df_result.columns = [f"{strategy_id}_{col}" for col in df_result.columns]
+    df_result.columns = [
+                            col if col.startswith(f"{strategy_id}_") else f"{strategy_id}_{col}"
+                            for col in df_result.columns
+                        ]
 
     end_time_total = time.perf_counter()
 
@@ -584,30 +617,50 @@ def load_strategies():
 # --- Strategy Metrics Applier ---
 def apply_statistics(result_df: pd.DataFrame) -> pd.DataFrame:
     calc = TradeStatisticsCalculator()
-    profits = result_df['Profit'].tolist()
-    result_df['TotalProfit'] = calc.total_profit(profits)
-    result_df['WinningRate'] = calc.winning_rate(profits)
-    result_df['PayoffRatio'] = calc.payoff_ratio(profits)
-    result_df['ExpectedValue'] = calc.expected_value(result_df['WinningRate'], result_df['PayoffRatio'])
-    result_df['DrawDown'] = calc.drawdown(result_df['TotalProfit'])
-    result_df['MaxDrawDown'] = calc.max_drawdown(result_df['DrawDown'])
+    result_df = result_df.copy()
+
+    # 戦略名（prefix）をすべて抽出
+    profit_cols = [col for col in result_df.columns if col.endswith("_Profit")]
+
+    for profit_col in profit_cols:
+        prefix = profit_col.replace("_Profit", "")
+        profits = result_df[profit_col].fillna(0.0).tolist()
+
+        result_df[f"{prefix}_TotalProfit"] = calc.total_profit(profits)
+        result_df[f"{prefix}_WinningRate"] = calc.winning_rate(profits)
+        result_df[f"{prefix}_PayoffRatio"] = calc.payoff_ratio(profits)
+        result_df[f"{prefix}_ExpectedValue"] = calc.expected_value(
+            result_df[f"{prefix}_WinningRate"],
+            result_df[f"{prefix}_PayoffRatio"]
+        )
+        result_df[f"{prefix}_DrawDown"] = calc.drawdown(
+            result_df[f"{prefix}_TotalProfit"]
+        )
+        result_df[f"{prefix}_MaxDrawDown"] = calc.max_drawdown(
+            result_df[f"{prefix}_DrawDown"]
+        )
+
     return result_df
+
 
 def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_id: str) -> pd.DataFrame:
     result = result.copy()
-    result["Profit"] = 0.0
+    result[f"{strategy_id}_Profit"] = 0.0
     result["ExecMatchKey"] = result.index.floor("T")
 
     used_pairs = set()
 
-    # 約定情報を記録する対象（ExecID → 時刻・価格を書き込むカラム）
+    # ✅ 約定ID列のパターン（Profitfixedを含む）
     exec_columns = [
-        ("Buy_New_ExecID", "Buy_New_ExecTime", "Buy_New_ExecPrice"),
-        ("Buy_Settlement_ExecID", "Buy_Settlement_ExecTime", "Buy_Settlement_ExecPrice"),
-        ("Buy_Stop_ExecID", "Buy_Stop_ExecTime", "Buy_Stop_ExecPrice"),
-        ("Sell_New_ExecID", "Sell_New_ExecTime", "Sell_New_ExecPrice"),
-        ("Sell_Settlement_ExecID", "Sell_Settlement_ExecTime", "Sell_Settlement_ExecPrice"),
-        ("Sell_Stop_ExecID", "Sell_Stop_ExecTime", "Sell_Stop_ExecPrice"),
+        (f"{strategy_id}_Buy_New_ExecID", f"{strategy_id}_Buy_New_ExecTime", f"{strategy_id}_Buy_New_ExecPrice"),
+        (f"{strategy_id}_Buy_Settlement_ExecID", f"{strategy_id}_Buy_Settlement_ExecTime", f"{strategy_id}_Buy_Settlement_ExecPrice"),
+        (f"{strategy_id}_Buy_Stop_ExecID", f"{strategy_id}_Buy_Stop_ExecTime", f"{strategy_id}_Buy_Stop_ExecPrice"),
+        (f"{strategy_id}_Buy_Profitfixed_ExecID", f"{strategy_id}_Buy_Profitfixed_ExecTime", f"{strategy_id}_Buy_Profitfixed_ExecPrice"),
+
+        (f"{strategy_id}_Sell_New_ExecID", f"{strategy_id}_Sell_New_ExecTime", f"{strategy_id}_Sell_New_ExecPrice"),
+        (f"{strategy_id}_Sell_Settlement_ExecID", f"{strategy_id}_Sell_Settlement_ExecTime", f"{strategy_id}_Sell_Settlement_ExecPrice"),
+        (f"{strategy_id}_Sell_Stop_ExecID", f"{strategy_id}_Sell_Stop_ExecTime", f"{strategy_id}_Sell_Stop_ExecPrice"),
+        (f"{strategy_id}_Sell_Profitfixed_ExecID", f"{strategy_id}_Sell_Profitfixed_ExecTime", f"{strategy_id}_Sell_Profitfixed_ExecPrice"),
     ]
 
     for exec_id_col, time_col, price_col in exec_columns:
@@ -622,51 +675,52 @@ def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_
                     result.at[mi, time_col] = order.execution_time
                     result.at[mi, price_col] = order.execution_price
 
-    # --- Profit 計算対象の Exit ExecID 列（BuyのExitはClose or Stop、Sellも同様）
-    exit_exec_columns = [
-        ("Buy", "Settlement"), ("Buy", "Stop"),
-        ("Sell", "Settlement"), ("Sell", "Stop")
-    ]
-
+    # ✅ 損益計算
     for idx in result.index:
-        for side, kind in exit_exec_columns:
-            exit_oid_col = f"{side}_{kind}_ExecID"
-            exit_oid = result.at[idx, exit_oid_col] if exit_oid_col in result.columns else None
-            if pd.isna(exit_oid):
-                continue
+        for suffix in ["Settlement", "Stop", "Profitfixed"]:
+            for side in ["Buy", "Sell"]:
+                exit_oid_col = f"{strategy_id}_{side}_{suffix}_ExecID"
+                if exit_oid_col not in result.columns:
+                    continue
+                exit_oid = result.at[idx, exit_oid_col]
+                if pd.isna(exit_oid):
+                    continue
 
-            exit_order = orderbook_dict.get(exit_oid)
-            if not exit_order:
-                continue
+                exit_order = orderbook_dict.get(exit_oid)
+                if not exit_order:
+                    continue
 
-            # ✅ Exit Order ID から Entry ID を明示的に逆算（_stop または _settlement）
-            if exit_oid.endswith("_stop"):
-                entry_oid = exit_oid.replace("_stop", "_entry")
-            elif exit_oid.endswith("_settlement"):
-                entry_oid = exit_oid.replace("_settlement", "_entry")
-            else:
-                continue
-
-            entry_order = orderbook_dict.get(entry_oid)
-            if not entry_order:
-                continue
-
-            pair_key = (entry_order.order_id, exit_order.order_id)
-            if pair_key in used_pairs:
-                continue
-
-            if entry_order.execution_price is not None and exit_order.execution_price is not None:
-                if entry_order.order_side == 'BUY':
-                    profit = exit_order.execution_price - entry_order.execution_price
+                # ✅ Exit Order に対応する Entry Order を推定
+                if exit_oid.endswith("_stop"):
+                    entry_oid = exit_oid.replace("_stop", "_newie")
+                elif exit_oid.endswith("_settlement"):
+                    entry_oid = exit_oid.replace("_settlement", "_newie")
+                elif exit_oid.endswith("_profitfixed"):
+                    entry_oid = exit_oid.replace("_profitfixed", "_newie")
                 else:
-                    profit = entry_order.execution_price - exit_order.execution_price
+                    continue
 
-                result.at[idx, "Profit"] = profit
-                used_pairs.add(pair_key)
-                break
+                entry_order = orderbook_dict.get(entry_oid)
+                if not entry_order:
+                    continue
+
+                pair_key = (entry_order.order_id, exit_order.order_id)
+                if pair_key in used_pairs:
+                    continue
+
+                if entry_order.execution_price is not None and exit_order.execution_price is not None:
+                    if entry_order.order_side == 'BUY':
+                        profit = exit_order.execution_price - entry_order.execution_price
+                    else:
+                        profit = entry_order.execution_price - exit_order.execution_price
+
+                    result.at[idx, f"{strategy_id}_Profit"] = profit
+                    used_pairs.add(pair_key)
+                    break  # 1件で十分
 
     result.drop(columns=["ExecMatchKey"], inplace=True)
     return result
+
 
 def get_trade_date(now: datetime) -> datetime.date:
     # ナイトセッションは17:00以降で、取引日は翌営業日
