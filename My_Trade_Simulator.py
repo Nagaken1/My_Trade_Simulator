@@ -642,6 +642,43 @@ def apply_statistics(result_df: pd.DataFrame) -> pd.DataFrame:
 
     return result_df
 
+def get_fixed_column_order(strategy_id: str) -> list:
+    base = ['Date', 'Open', 'High', 'Low', 'Close']
+    exec_columns_flat = [
+        f"{strategy_id}_Buy_New_OrderID", f"{strategy_id}_Buy_New_OrderTime", f"{strategy_id}_Buy_New_OrderPrice",
+        f"{strategy_id}_Buy_New_ExecID", f"{strategy_id}_Buy_New_ExecTime", f"{strategy_id}_Buy_New_ExecPrice",
+
+        f"{strategy_id}_Buy_Settlement_OrderID", f"{strategy_id}_Buy_Settlement_OrderTime", f"{strategy_id}_Buy_Settlement_OrderPrice",
+        f"{strategy_id}_Buy_Settlement_ExecID", f"{strategy_id}_Buy_Settlement_ExecTime", f"{strategy_id}_Buy_Settlement_ExecPrice",
+
+        f"{strategy_id}_Buy_Stop_OrderID", f"{strategy_id}_Buy_Stop_OrderTime", f"{strategy_id}_Buy_Stop_OrderPrice",
+        f"{strategy_id}_Buy_Stop_ExecID", f"{strategy_id}_Buy_Stop_ExecTime", f"{strategy_id}_Buy_Stop_ExecPrice",
+
+        f"{strategy_id}_Buy_Profitfixed_OrderID", f"{strategy_id}_Buy_Profitfixed_OrderTime", f"{strategy_id}_Buy_Profitfixed_OrderPrice",
+        f"{strategy_id}_Buy_Profitfixed_ExecID", f"{strategy_id}_Buy_Profitfixed_ExecTime", f"{strategy_id}_Buy_Profitfixed_ExecPrice",
+
+        f"{strategy_id}_Sell_New_OrderID", f"{strategy_id}_Sell_New_OrderTime", f"{strategy_id}_Sell_New_OrderPrice",
+        f"{strategy_id}_Sell_New_ExecID", f"{strategy_id}_Sell_New_ExecTime", f"{strategy_id}_Sell_New_ExecPrice",
+
+        f"{strategy_id}_Sell_Settlement_OrderID", f"{strategy_id}_Sell_Settlement_OrderTime", f"{strategy_id}_Sell_Settlement_OrderPrice",
+        f"{strategy_id}_Sell_Settlement_ExecID", f"{strategy_id}_Sell_Settlement_ExecTime", f"{strategy_id}_Sell_Settlement_ExecPrice",
+
+        f"{strategy_id}_Sell_Stop_OrderID", f"{strategy_id}_Sell_Stop_OrderTime", f"{strategy_id}_Sell_Stop_OrderPrice",
+        f"{strategy_id}_Sell_Stop_ExecID", f"{strategy_id}_Sell_Stop_ExecTime", f"{strategy_id}_Sell_Stop_ExecPrice",
+
+        f"{strategy_id}_Sell_Profitfixed_OrderID", f"{strategy_id}_Sell_Profitfixed_OrderTime", f"{strategy_id}_Sell_Profitfixed_OrderPrice",
+        f"{strategy_id}_Sell_Profitfixed_ExecID", f"{strategy_id}_Sell_Profitfixed_ExecTime", f"{strategy_id}_Sell_Profitfixed_ExecPrice",
+
+        f"{strategy_id}_Buy_Stop_CancelID", f"{strategy_id}_Buy_Stop_CancelTime",
+        f"{strategy_id}_Buy_Profitfixed_CancelID", f"{strategy_id}_Buy_Profitfixed_CancelTime",
+
+        f"{strategy_id}_Sell_Stop_CancelID", f"{strategy_id}_Sell_Stop_CancelTime",
+        f"{strategy_id}_Sell_Profitfixed_CancelID", f"{strategy_id}_Sell_Profitfixed_CancelTime",
+
+        f"{strategy_id}_Profit", f"{strategy_id}_TotalProfit", f"{strategy_id}_WinningRate",
+        f"{strategy_id}_PayoffRatio", f"{strategy_id}_ExpectedValue", f"{strategy_id}_DrawDown", f"{strategy_id}_MaxDrawDown"
+    ]
+    return base + exec_columns_flat
 
 def apply_execution_prices(result: pd.DataFrame, orderbook_dict: dict, strategy_id: str) -> pd.DataFrame:
     result = result.copy()
@@ -800,6 +837,13 @@ def main():
 
     # ✅ Dateでの整合を取りつつ横に合体（再index化不要）
     final_df = pd.merge(base_columns, combined_df, on="Date", how="left")
+
+    fixed_columns = get_fixed_column_order("Rule_PromptFollow")
+    for col in fixed_columns:
+        if col not in final_df.columns:
+            final_df[col] = None  # 空欄で追加
+
+    final_df = final_df[fixed_columns]
 
     # 💾 書き出し（index=False）
     final_df.to_csv("result_stats.csv", index=False)
